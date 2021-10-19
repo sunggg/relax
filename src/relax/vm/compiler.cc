@@ -223,9 +223,6 @@ PackedFunc VMCompiler::GetFunction(const std::string& name, const ObjectPtr<Obje
 }
 
 void VMCompiler::Compile(IRModule mod, Target target, Target target_host) {
-  // Reset internal builder
-  builder_ = relax::ExecBuilderNode::Create();
-
   IRModule tir_mod;
   IRModule rx_mod;
   for (auto& p : mod->functions) {
@@ -240,8 +237,13 @@ void VMCompiler::Compile(IRModule mod, Target target, Target target_host) {
       LOG(FATAL) << "Cannot handle such function node now:\n" << func;
     }
   }
-  lib_ = tvm::build(tir_mod, target, target_host);
+  const PackedFunc* pf = tvm::runtime::Registry::Get("mybuild");
+  lib_ = (*pf)(tir_mod, target, target_host);
+  // lib_ = tvm::build(tir_mod, target, target_host);
 
+  LOG(INFO) << "build relax program";
+  // Reset internal builder
+  builder_ = relax::ExecBuilderNode::Create();
   VMCompilerImpl compiler(builder_.operator->());
   for (auto& p : rx_mod->functions) {
     compiler.VisitExpr(p.second);
