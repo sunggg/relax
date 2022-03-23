@@ -23,6 +23,10 @@ from tvm.relay import transform
 from tvm.relax.testing import relay_translator
 from tvm.meta_schedule.integration import extract_task_from_relax, extract_task_from_relay
 from os.path import exists
+from tvm.contrib.download import download_testdata
+import logging
+
+log = logging.getLogger(__name__)
 
 
 def import_onnx_with_qat(
@@ -67,7 +71,7 @@ def deserialize_relay(json_path, params_path):
     return mod, params
 
 
-if __name__ == "__main__":
+def test_task_extraction():
     batch_size = 1
     seq_len = 128
     shape_dict = {
@@ -75,14 +79,18 @@ if __name__ == "__main__":
         "segment_ids": (batch_size, seq_len),
         "input_mask": (batch_size, seq_len),
     }
-    input_path = "bert-base-qat.onnx"
+    model_name = "bert-base-qat.onnx"
     json_path = "bert-base-int8.json"
     params_path = "bert-base-int8.params"
 
     if exists(json_path) and exists(params_path):
         relay_mod, params = deserialize_relay(json_path, params_path)
     else:
-        relay_mod, params = import_onnx_with_qat(input_path, shape_dict, json_path, params_path)
+        # download model
+        url = f"https://github.com/tlc-pack/TLCBench/raw/main/models/{model_name}"
+        log.info("Downloading quantized bert-base model.")
+        model_path = download_testdata(url, model_name, module="tlcbench")
+        relay_mod, params = import_onnx_with_qat(model_path, shape_dict, json_path, params_path)
 
     target, dev = tvm.target.Target("cuda"), tvm.cuda()
 
@@ -90,3 +98,7 @@ if __name__ == "__main__":
     extracted_tasks = extract_task_from_relax(relax_mod, target)
     for i, tsk in enumerate(extracted_tasks):
         print(f"[{i}] {tsk.task_name}, {tsk.mod}")
+
+
+if __name__ == "__main__":
+    test_task_extraction()
