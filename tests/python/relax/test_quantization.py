@@ -18,13 +18,15 @@
 from __future__ import annotations
 import onnx
 import tvm
-from tvm import relay
+from tvm import relay, relax
 from tvm.relay import transform
 from tvm.relax.testing import relay_translator
 from tvm.meta_schedule.integration import extract_task_from_relax, extract_task_from_relay
 from os.path import exists
 from tvm.contrib.download import download_testdata
 import logging
+import numpy as np
+from tvm.script import relax as R
 
 log = logging.getLogger(__name__)
 
@@ -71,7 +73,7 @@ def deserialize_relay(json_path, params_path):
     return mod, params
 
 
-def test_task_extraction():
+def load_relax_model():
     batch_size = 1
     seq_len = 128
     shape_dict = {
@@ -92,13 +94,34 @@ def test_task_extraction():
         model_path = download_testdata(url, model_name, module="tlcbench")
         relay_mod, params = import_onnx_with_qat(model_path, shape_dict, json_path, params_path)
 
-    target, dev = tvm.target.Target("cuda"), tvm.cuda()
-
     relax_mod = relay_translator.from_relay(relay_mod["main"])
+
+    data1 = np.random.uniform(size=shape_dict["input_ids"]).astype("long")
+    data2 = np.random.uniform(size=shape_dict["segment_ids"]).astype("long")
+    data3 = np.random.uniform(size=shape_dict["input_mask"]).astype("long")
+
+    # R.parser.pretty_print(relax_mod["main"])
+    return relax_mod, [tvm.nd.array(data1), tvm.nd.array(data2), tvm.nd.array(data3)]
+
+
+def test_task_extraction(target_str="cuda", device_id=0):
+    target, dev = tvm.target.Target(target_str), tvm.device(target_str, device_id)
+
+    relax_mod, _ = load_relax_model()
     extracted_tasks = extract_task_from_relax(relax_mod, target)
     for i, tsk in enumerate(extracted_tasks):
         print(f"[{i}] {tsk.task_name}, {tsk.mod}")
 
 
+def test_vm(target_str="cuda", device_id=0):
+    target, dev = tvm.target.Target(target_str), tvm.device(target_str, device_id)
+    relax_mod, inp = load_relax_model()
+    ex, lib = relax.vm.build(relax_mod, target)
+    vm = relax.VirtualMachine(ex, tvm.cpu(), mod=lib)
+
+    res = vm["main"](*inp)
+
+
 if __name__ == "__main__":
-    test_task_extraction()
+    # test_task_extraction()
+    test_vm(target_str="llvm", device_id=0)
