@@ -100,7 +100,6 @@ def load_relax_model():
     data2 = np.random.uniform(size=shape_dict["segment_ids"]).astype("long")
     data3 = np.random.uniform(size=shape_dict["input_mask"]).astype("long")
 
-    # R.parser.pretty_print(relax_mod["main"])
     return relax_mod, [tvm.nd.array(data1), tvm.nd.array(data2), tvm.nd.array(data3)]
 
 
@@ -116,8 +115,9 @@ def test_task_extraction(target_str="cuda", device_id=0):
 def test_vm(target_str="cuda", device_id=0):
     target, dev = tvm.target.Target(target_str), tvm.device(target_str, device_id)
     relax_mod, inp = load_relax_model()
-    ex, lib = relax.vm.build(relax_mod, target)
-    vm = relax.VirtualMachine(ex, tvm.cpu(), mod=lib)
+    R.parser.pretty_print(relax_mod["main"])
+    ex = relax.vm.build(relax_mod, target)
+    vm = relax.VirtualMachine(ex, tvm.cpu())
 
     res = vm["main"](*inp)
 
