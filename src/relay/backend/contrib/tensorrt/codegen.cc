@@ -244,12 +244,20 @@ class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
 runtime::Module TensorRTCompiler(const ObjectRef& ref) {
   ICHECK(ref->IsInstance<FunctionNode>()) << "The input ref is expected to be a Relay function.";
   Function func = Downcast<Function>(ref);
-  std::string func_name = backend::GetExtSymbol(func);
+  //std::string func_name = backend::GetExtSymbol(func);
+  std::string func_name = "default";
 
   TensorRTJSONSerializer serializer(func_name, func);
   serializer.serialize();
   std::string graph_json = serializer.GetJSON();
   auto param_names = serializer.GetParams();
+
+  std::cout << graph_json << "\n";
+  std::cout << "# of params: " << param_names.size() << "\n";
+  for (const auto& kv : param_names) {
+    std::cout << kv << "\n";
+  }
+
   const auto* pf = runtime::Registry::Get("runtime.tensorrt_runtime_create");
   ICHECK(pf != nullptr) << "Cannot find TensorRT runtime module create function.";
   runtime::Module lib = (*pf)(func_name, graph_json, param_names);

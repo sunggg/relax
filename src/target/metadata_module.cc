@@ -223,6 +223,17 @@ runtime::Module CreateMetadataModule(
   }
 }
 
+
+// @Sung
+// This does not work with type conversion error. 
+// Why? 
+// TVM_REGISTER_GLOBAL("runtime.CreateLLVMCrtMetadataModule")
+//    .set_body_typed(CreateLLVMCrtMetadataModule);
+// <- this works tho
+//TVM_REGISTER_GLOBAL("runtime.CreatetMetadataModule")
+//    .set_body_typed(CreateMetadataModule);
+
+
 }  // namespace codegen
 
 }  // namespace tvm

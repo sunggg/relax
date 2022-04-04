@@ -137,7 +137,7 @@ class VirtualMachine(object):
         return self.module[key]
 
 
-def build(mod: tvm.IRModule, target: tvm.target.Target) -> Executable:
+def build(mod: tvm.IRModule, target: tvm.target.Target, ext_libs=None, params=dict()) -> Executable:
     """
     Build an IRModule to VM executable.
 
@@ -185,7 +185,12 @@ def build(mod: tvm.IRModule, target: tvm.target.Target) -> Executable:
     # split primfunc and relax function
     rx_mod, tir_mod = _split_tir_relax(new_mod)
     lib = tvm.build(tir_mod, target=target)
-    return Executable(_ffi_api.VMCodeGen(rx_mod, lib))
+
+    # @Sung: getting ext_lib as an argument is only a temporary solution.
+    #        will fix this when we support multiple relax func and func attr
+
+    # Connect with Metadata Module
+    return Executable(_ffi_api.VMCodeGen(rx_mod, lib, ext_libs, params))
 
 
 def _split_tir_relax(mod: tvm.IRModule) -> Tuple[tvm.IRModule, tvm.IRModule]:

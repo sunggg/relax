@@ -145,6 +145,7 @@ class JSONRuntimeBase : public ModuleNode {
    * \param args The packed args.
    */
   void SetInputOutputBuffers(const TVMArgs& args) {
+    std::cout << args.size() << ","<< input_var_eid_.size() << "," << outputs_.size() << "\n";
     ICHECK_EQ(args.size(), input_var_eid_.size() + outputs_.size())
         << "Found mismatch in the number of provided data entryies and required.";
 

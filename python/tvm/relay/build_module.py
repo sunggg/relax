@@ -484,6 +484,7 @@ def build(
             workspace_memory_pools=workspace_memory_pools,
             mod_name=mod_name,
         )
+
         func_metadata = bld_mod.get_function_metadata()
         devices = bld_mod.get_devices()
         lowered_ir_mods = bld_mod.get_irmodule()
