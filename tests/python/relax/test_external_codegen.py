@@ -1,5 +1,7 @@
 from __future__ import annotations
 import tvm
+import tvm.testing
+
 from tvm import relax, relay
 import numpy as np
 from tvm.script import tir as T, relax as R
@@ -98,32 +100,28 @@ def test_extern_trt_hybrid():
     ishape = (32, 256, 56, 56)
     w1shape = (128, 256, 1, 1)
     outshape = (32, 128, 28, 28)
+
     data0 = relay.var("x", shape=(ishape), dtype=dtype)
     weight0 = relay.var("w", shape=(w1shape), dtype=dtype)
-
+    data = tvm.nd.array(np.random.uniform(0, 10, ishape).astype(np.float32), tvm.cpu())
+    weight = tvm.nd.array(np.random.uniform(0, 1, w1shape).astype(np.float32), tvm.cpu())
+    z = tvm.nd.array(np.random.uniform(0, 1, outshape).astype(np.float32), tvm.cpu())
     out = relay.nn.conv2d(data0, weight0, strides=(2, 2), padding=(0, 0, 0, 0))
 
     f = relay.Function([data0, weight0], out)
+    f = relay.build_module.bind_params_by_name(f, {"w": weight})
 
+    ref_mod = tvm.IRModule.from_expr(f)
     f = f.with_attr("Compiler", "tensorrt")
     f = f.with_attr("Composite", "test-composite")
-    f = f.with_attr("PartitionedFromPattern", "test-composite")
 
-    target = "cuda"
-    dev = tvm.device(target, 0)
-    data = tvm.nd.array(np.random.uniform(0, 1, ishape).astype(np.float32), dev)
-    weight = tvm.nd.array(np.random.uniform(0, 1, w1shape).astype(np.float32), dev)
-    z = tvm.nd.array(np.random.uniform(0, 1, outshape).astype(np.float32), dev)
-    # mod = relax.transform.BindParams("main", {"x": data})(mod)
-    # mod = relax.transform.BindParams("main", {"w": weight})(mod)
+    print(f)
+    assert 0
 
     trt_engine = tvm.get_global_func("relay.ext.tensorrt", True)
 
-    f = relay.build_module.bind_params_by_name(f, {"w": weight})
     mod = tvm.IRModule.from_expr(f)
-    print(mod)
     mod = relay.transform.InferType()(mod)
-    print(mod)
     trt_lib = trt_engine(mod["main"])
 
     @tvm.script.ir_module
@@ -131,36 +129,44 @@ def test_extern_trt_hybrid():
         @R.function
         def main(
             x: Tensor[(32, 256, 56, 56), "float32"],
-            # w: Tensor[(128, 256, 1, 1), "float32"],
             z: Tensor[(32, 128, 28, 28), "float32"],
         ) -> Tensor:
             with R.dataflow():
-                lv0 = R.call_packed("default", x, w, z)
-                # lv0 = R.call_packed("default", x, w, z)
+                lv0 = R.call_packed("default", x, z)
                 R.output(lv0)
             return lv0
 
     mod = InputModule
     assert isinstance(mod, tvm.IRModule)
+    mod = relax.transform.BindParams("main", {"default_const_0": weight})(mod)
 
+    target = "cuda"
+    dev = tvm.device(target, 0)
+    params = {"default_const_0": weight}
     with transform.PassContext(opt_level=3):
-        ex0 = relax.vm.build(mod, target, [trt_lib])
+        ex0 = relax.vm.build(mod, target, [trt_lib], params=params)
 
     vm0 = relax.VirtualMachine(ex0, dev)
 
     # Measure the performance w/o tuning log
     tic = time.time()
-    # vm0["main"](data, weight, z)
     vm0["main"](data, z)
     toc = time.time()
     e0 = toc - tic
     print(f"w/o tuning: {e0}")
 
+    lib = tvm.relay.backend.vm.compile(ref_mod, target=target, params=params)
+    exe = tvm.runtime.vm.VirtualMachine(lib, dev)
+
+    exe.set_input("main", data)
+    output = exe.invoke("main")
+
+    tvm.testing.assert_allclose(z.numpy(), output.numpy())
+
     # graph_mod = tvm.contrib.graph_executor.GraphModule(lib["default"](tvm.cuda()))
     # i_data = np.random.uniform(0, 1, ishape).astype(dtype)
     # w_data = np.random.uniform(0, 1, w1shape).astype(dtype)
     # rt_mod(i_data, w_data)
-    assert 0
 
     # i_data = np.random.uniform(0, 1, ishape).astype(dtype)
     # w_data = np.random.uniform(0, 1, w1shape).astype(dtype)

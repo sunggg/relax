@@ -424,8 +424,6 @@ Module CodeGen(IRModule mod, Optional<Module> lib, Array<Module> ext_mods, Map<S
   for (const auto& kv : params_) {
     params_tmp[kv.first] = kv.second;
   }
-  std::cout << "In codegen: " << params_tmp.size() << "\n";
-
 
   // difference between Module vs runtime::Module?
   // Pass the params
