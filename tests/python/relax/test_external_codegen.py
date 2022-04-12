@@ -113,16 +113,14 @@ def test_extern_trt_hybrid():
 
     ref_mod = tvm.IRModule.from_expr(f)
     f = f.with_attr("Compiler", "tensorrt")
+    f = f.with_attr("global_symbol", "default")
     f = f.with_attr("Composite", "test-composite")
-
     print(f)
-    assert 0
-
     trt_engine = tvm.get_global_func("relay.ext.tensorrt", True)
 
     mod = tvm.IRModule.from_expr(f)
     mod = relay.transform.InferType()(mod)
-    trt_lib = trt_engine(mod["main"])
+    trt_lib = trt_engine(mod["default"])
 
     @tvm.script.ir_module
     class InputModule:
