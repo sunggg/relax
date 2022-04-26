@@ -36,6 +36,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../../../target/metadata_module.h"
+#include "../../../target/source/codegen_source_base.h"
+
 namespace tvm {
 namespace relax {
 namespace relax_vm {
@@ -462,13 +465,29 @@ ObjectPtr<Executable> VMCodeGen::GetExec() { return builder_->Get(); }
  * \param lib The kernel library.
  * \return The constructed Relax VM executable.
  */
-Module CodeGen(IRModule mod, Optional<Module> lib) {
+Module CodeGen(IRModule mod, Optional<Module> lib, Array<Module> ext_mods,
+               Map<String, runtime::NDArray> params_) {
   VMCodeGen codegen;
   codegen.CodeGen(mod);
   ObjectPtr<Executable> executable = codegen.GetExec();
-  if (lib.defined()) {
-    executable->Import(lib.value());
+  // if (lib.defined()) {
+  //  executable->Import(lib.value());
+  //}
+  if (!lib.defined()) {
+    lib = codegen::CSourceModuleCreate(";", "", Array<String>{});
   }
+  // @sunggg
+  tvm::Target host_target("llvm");
+
+  std::unordered_map<std::string, runtime::NDArray> params_tmp;
+  for (const auto& kv : params_) {
+    params_tmp[kv.first] = kv.second;
+  }
+  Module combined_lib = codegen::CreateMetadataModule(params_tmp, lib.value(), ext_mods,
+                                                      host_target, relay::Runtime::Create("cpp"),
+                                                      relay::backend::ExecutorCodegenMetadata());
+  executable->Import(combined_lib);
+
   return Module(executable);
 }
 

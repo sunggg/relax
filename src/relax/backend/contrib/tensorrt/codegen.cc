@@ -18,26 +18,27 @@
  */
 
 /*!
- * \file src/relay/backend/contrib/tensorrt/codegen.cc
+ * \file src/relax/backend/contrib/tensorrt/codegen.cc
  * \brief Implementation of the TensorRT JSON serializer.
  */
 #include <tvm/ir/module.h>
-#include <tvm/relay/attrs/nn.h>
-#include <tvm/relay/type.h>
+// TODO: add operator attribute when it's ready
+//#include <tvm/relax/attrs/nn.h>
+#include <tvm/relax/type.h>
 
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "../../utils.h"
 #include "../codegen_json/codegen_json.h"
+#include "../utils.h"
 
 #if TVM_GRAPH_EXECUTOR_TENSORRT
 #include "NvInfer.h"
 #endif
 
 namespace tvm {
-namespace relay {
+namespace relax {
 namespace contrib {
 
 /*! \brief Attributes to store the compiler options for TensorRT. */
@@ -49,7 +50,7 @@ struct TensorRTCompilerConfigNode : public tvm::AttrsNode<TensorRTCompilerConfig
   bool use_fp16;
   bool use_uint8;
 
-  TVM_DECLARE_ATTRS(TensorRTCompilerConfigNode, "ext.attrs.TensorRTCompilerConfigNode") {
+  TVM_DECLARE_ATTRS(TensorRTCompilerConfigNode, "relax.ext.attrs.TensorRTCompilerConfigNode") {
     TVM_ATTR_FIELD(tensorrt_version)
         .describe("TensorRT version as (major, minor, patch).")
         .set_default(Array<Integer>({6, 0, 1}));
@@ -68,14 +69,14 @@ class TensorRTCompilerConfig : public Attrs {
 };
 
 TVM_REGISTER_NODE_TYPE(TensorRTCompilerConfigNode);
-TVM_REGISTER_PASS_CONFIG_OPTION("relay.ext.tensorrt.options", TensorRTCompilerConfig);
+TVM_REGISTER_PASS_CONFIG_OPTION("relax.ext.tensorrt.options", TensorRTCompilerConfig);
 
 /*!
- * \brief Generates an TensorRTModule from a relay expression by serializing the expression to a
+ * \brief Generates an TensorRTModule from a relax expression by serializing the expression to a
  * json representation. TensorRT is not required here because use of TensorRT APIs is deferred until
  * runtime.
  */
-class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
+class TensorRTJSONSerializer : public relax::backend::contrib::JSONSerializer {
   using JSONGraphNode = tvm::runtime::json::JSONGraphNode;
   using JSONGraphNodeEntry = tvm::runtime::json::JSONGraphNodeEntry;
 
@@ -84,16 +85,16 @@ class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
       : JSONSerializer(symbol, expr) {}
 
   std::vector<JSONGraphNodeEntry> VisitExpr_(const CallNode* cn) {
-    std::cout << "TRT JSON Serializer: Visit call node " << cn << "\n";
     std::string name;
     if (const auto* op_node = cn->op.as<OpNode>()) {
       name = op_node->name;
+      // TODO: Requires a discussion. Currently, simply remove "relax." prefix to make it work.
+      name = name.substr(6);
     } else {
       return JSONSerializer::VisitExpr_(cn);
     }
 
     std::vector<JSONGraphNodeEntry> inputs;
-    std::cout << "TRT JSON Serializer: Visit call node - # args" << cn->args.size() << "\n";
     for (const auto& arg : cn->args) {
       auto res = VisitExpr(arg);
       inputs.insert(inputs.end(), res.begin(), res.end());
@@ -101,6 +102,9 @@ class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
     auto node = std::make_shared<JSONGraphNode>(name,     /* name_ */
                                                 "kernel", /* op_type_ */
                                                 inputs, 1 /* num_outputs_ */);
+
+    // TODO: disabled for now
+    /*
     if (name == "nn.pad") {
       SetPadNodeAttribute(node, cn);
     } else if (name == "strided_slice") {
@@ -110,11 +114,15 @@ class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
     } else {
       SetCallNodeAttribute(node, cn);
     }
+    */
+
     // These attributes are global to the whole module.
     SaveGlobalAttributes(node);
     return AddNode(node, GetRef<Expr>(cn));
   }
 
+  /*
+  // attributes are not supported now
   void SetPadNodeAttribute(std::shared_ptr<JSONGraphNode> node, const CallNode* cn) {
     const auto* pad_attr = cn->attrs.as<PadAttrs>();
     ICHECK(pad_attr);
@@ -208,10 +216,10 @@ class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
     node->SetAttr("mode", mode_attr);
     node->SetAttr("axis", axis_attr);
   }
-
+  */
   void SaveGlobalAttributes(std::shared_ptr<JSONGraphNode> node) {
     auto ctx = transform::PassContext::Current();
-    auto cfg = ctx->GetConfig<TensorRTCompilerConfig>("relay.ext.tensorrt.options");
+    auto cfg = ctx->GetConfig<TensorRTCompilerConfig>("relax.ext.tensorrt.options");
     if (!cfg.defined()) {
       cfg = AttrsWithDefaultValues<TensorRTCompilerConfig>();
     }
@@ -240,27 +248,30 @@ class TensorRTJSONSerializer : public backend::contrib::JSONSerializer {
 
 /*!
  * \brief Create a runtime module for TensorRT.
- * \param ref The ext_func Relay expression/module to be executed using extern ops.
+ * \param ref The ext_func Relax expression/module to be executed using extern ops.
  * \return A runtime module.
  */
+
 runtime::Module TensorRTCompiler(const ObjectRef& ref) {
-  ICHECK(ref->IsInstance<FunctionNode>()) << "The input ref is expected to be a Relay function.";
+  std::cout << "Relax TRT codegen\n";
+  ICHECK(ref->IsInstance<FunctionNode>()) << "The input ref is expected to be a Relax function.";
   Function func = Downcast<Function>(ref);
   std::string func_name = backend::GetExtSymbol(func);
 
   TensorRTJSONSerializer serializer(func_name, func);
   serializer.serialize();
-  std::string graph_json = serializer.GetJSON();
 
-  std::cout << "graph_json: " << graph_json << "\n";
+  std::string graph_json = serializer.GetJSON();
   auto param_names = serializer.GetParams();
+  std::cout << "graph_json: " << graph_json << "\n";
+
   const auto* pf = runtime::Registry::Get("runtime.tensorrt_runtime_create");
   ICHECK(pf != nullptr) << "Cannot find TensorRT runtime module create function.";
   runtime::Module lib = (*pf)(func_name, graph_json, param_names);
   return lib;
 }
 
-TVM_REGISTER_GLOBAL("relay.ext.tensorrt").set_body_typed(TensorRTCompiler);
+TVM_REGISTER_GLOBAL("relax.ext.tensorrt").set_body_typed(TensorRTCompiler);
 
 /*!
  * \brief Check whether TensorRT graph executor is enabled.
@@ -287,10 +298,10 @@ Array<Integer> GetTensorRTVersion() {
 #endif  // TVM_GRAPH_EXECUTOR_TENSORRT
 }
 
-TVM_REGISTER_GLOBAL("relay.op.is_tensorrt_runtime_enabled")
+TVM_REGISTER_GLOBAL("relax.op.is_tensorrt_runtime_enabled")
     .set_body_typed(IsTensorRTRuntimeEnabled);
-TVM_REGISTER_GLOBAL("relay.op.get_tensorrt_version").set_body_typed(GetTensorRTVersion);
+TVM_REGISTER_GLOBAL("relax.op.get_tensorrt_version").set_body_typed(GetTensorRTVersion);
 
 }  // namespace contrib
-}  // namespace relay
+}  // namespace relax
 }  // namespace tvm

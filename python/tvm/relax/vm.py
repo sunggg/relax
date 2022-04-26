@@ -137,7 +137,7 @@ class VirtualMachine(object):
         return self.module[key]
 
 
-def build(mod: tvm.IRModule, target: tvm.target.Target) -> Executable:
+def build(mod: tvm.IRModule, target: tvm.target.Target, ext_libs=None, params=dict()) -> Executable:
     """
     Build an IRModule to VM executable.
 
@@ -183,23 +183,41 @@ def build(mod: tvm.IRModule, target: tvm.target.Target) -> Executable:
     new_mod = seq(mod)
 
     # split primfunc and relax function
-    rx_mod, tir_mod = _split_tir_relax(new_mod)
+    rx_mod, ext_mod, tir_mod = _split_mod(new_mod)
+
+    if ext_libs is None:
+        ext_libs = []
+        for gv in ext_mod.get_global_vars():
+            _ext_mod = ext_mod[gv]
+            attrs = _ext_mod.attrs
+            assert (attrs) and ("Codegen" in attrs) and ("global_symbol" in attrs)
+            codegen_name, new_sym = attrs["Codegen"], attrs["global_symbol"]
+            codegen = tvm.get_global_func(f"relax.ext.{codegen_name}", True)
+            assert codegen
+
+            ext_lib = codegen(_ext_mod)
+            ext_libs.append(ext_lib)
+
     lib = tvm.build(tir_mod, target=target)
-    return Executable(_ffi_api.VMCodeGen(rx_mod, lib))
+    return Executable(_ffi_api.VMCodeGen(rx_mod, lib, ext_libs, params))
 
 
-def _split_tir_relax(mod: tvm.IRModule) -> Tuple[tvm.IRModule, tvm.IRModule]:
+def _split_mod(mod: tvm.IRModule) -> Tuple[tvm.IRModule, tvm.IRModule]:
     rx_mod = IRModule({})
     tir_mod = IRModule({})
+    ext_mod = IRModule({})
     for gv in mod.get_global_vars():
         if isinstance(mod[gv], PrimFunc):
             tir_mod[gv] = mod[gv]
         elif isinstance(mod[gv], relax.Function):
-            rx_mod[gv] = mod[gv]
+            if mod[gv].attrs and mod[gv].attrs["Codegen"] != "default":
+                ext_mod[gv] = mod[gv]
+            else:
+                rx_mod[gv] = mod[gv]
         else:
             raise TypeError(
                 "IRModule is expected to contain PrimFunc or Function, but gets {}".format(
                     type(mod[gv])
                 )
             )
-    return rx_mod, tir_mod
+    return rx_mod, ext_mod, tir_mod

@@ -18,11 +18,11 @@
  */
 
 /*!
- * \file relay/backend/contrib/codegen_json.h
+ * \file relax/backend/contrib/codegen_json.h
  * \brief Utilities for json codegen and runtime
  */
-#ifndef TVM_RELAY_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
-#define TVM_RELAY_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
+#ifndef TVM_RELAX_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
+#define TVM_RELAX_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
 
 #include <dmlc/any.h>
 #include <dmlc/json.h>
@@ -37,10 +37,10 @@
 
 #include "../../../../runtime/contrib/json/json_node.h"
 #include "../../../../runtime/contrib/json/json_runtime.h"
-#include "../../utils.h"
+#include "../utils.h"
 
 namespace tvm {
-namespace relay {
+namespace relax {
 namespace backend {
 namespace contrib {
 
@@ -141,27 +141,31 @@ class OpAttrExtractor : public AttrVisitor {
   ReflectionVTable* reflection_ = ReflectionVTable::Global();
 };
 
-/*! \brief Serialize a Relay expression to JSON. */
-class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEntry>> {
+/*! \brief Serialize a Relax expression to JSON. */
+class JSONSerializer
+    : public tvm::relax::backend::MemoizedExprTranslator<std::vector<JSONGraphNodeEntry>> {
  public:
   /*!
    * \brief Constructor
    *
    * \param symbol The symbol that represents the graph being converted.
-   * \param expr The Relay expression to be converted to the JSON form.
+   * \param expr The Relax expression to be converted to the JSON form.
    */
   JSONSerializer(const std::string& symbol, const Expr& expr) : symbol_(symbol), func_(expr) {}
 
   void serialize() {
-    relay::Function func = Downcast<relay::Function>(func_);
+    relax::Function func = Downcast<relax::Function>(func_);
+
     // First we convert all the parameters into input nodes.
     for (const auto& param : func->params) {
+      std::cout << "Serialize - param: " << param->name_hint() << "\n";
       auto node_ptr = std::make_shared<JSONGraphNode>(param->name_hint(), "input" /* op_type_ */);
-
-      std::cout << "Serialze - handle func param: " << param->name_hint() << "\n";
       memo_[param] = AddNode(node_ptr, param);
     }
+
+    std::cout << "Serialize - Visit function body: " << func->body << "\n";
     heads_ = VisitExpr(func->body);
+    std::cout << "Serialize - Done\n";
   }
 
   /*!\brief Return the required params. */
@@ -182,8 +186,8 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
    * \param node A graph node. It is a shared pointer. Some attributes of it
    *        will be added, i.e. shape and type. These attributes are attached to
    *        the JSON graph in the end.
-   * \param expr The relay expression.
-   * \return A list of graph entry nodes. It the relay expr is a tuple type, we
+   * \param expr The relax expression.
+   * \return A list of graph entry nodes. It the relax expr is a tuple type, we
    *         will flatten it.
    */
   std::vector<JSONGraphNodeEntry> AddNode(JSONGraphObjectPtr node, const Expr& expr) {
@@ -193,21 +197,27 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
     std::vector<JSONGraphNodeEntry> ret;
     ShapeVector shape;
     TypeVector dtype;
+
     // Flatten tuple node.
     if (const auto* tuple_type = checked_type.as<TupleTypeNode>()) {
       for (size_t i = 0; i < tuple_type->fields.size(); ++i) {
-        const auto* tensor_type = tuple_type->fields[i].as<TensorTypeNode>();
-        ICHECK(tensor_type) << "Expect TensorType, but received: ."
+        const auto* tensor_type = tuple_type->fields[i].as<DynTensorTypeNode>();
+        ICHECK(tensor_type) << "Expect DynTensorType, but received: ."
                             << tuple_type->fields[i]->GetTypeKey();
+        ICHECK(expr->shape_.defined()) << "Expect shape to be defined. ";
+        ShapeExpr output_shape = Downcast<ShapeExpr>(expr->shape_.value());
         ret.push_back(JSONGraphNodeEntry(node_id, i));
-        shape.emplace_back(GetIntShape(tensor_type->shape));
+        shape.emplace_back(GetIntShape(output_shape->values));
         dtype.emplace_back(DType2String(tensor_type->dtype));
       }
       node->SetNumOutput(tuple_type->fields.size());
     } else {
-      const auto* tensor_type = checked_type.as<TensorTypeNode>();
-      ICHECK(tensor_type) << "Expect TensorType, but received: " << checked_type->GetTypeKey();
-      shape.emplace_back(GetIntShape(tensor_type->shape));
+      const auto* tensor_type = checked_type.as<DynTensorTypeNode>();
+      ICHECK(tensor_type) << "Expect DynTensorType, but received: " << checked_type->GetTypeKey();
+      ICHECK(expr->shape_.defined()) << "Expect shape to be defined. ";
+      ShapeExpr output_shape = Downcast<ShapeExpr>(expr->shape_.value());
+
+      shape.emplace_back(GetIntShape(output_shape->values));
       dtype.emplace_back(DType2String(tensor_type->dtype));
       ret.push_back(JSONGraphNodeEntry(node_id, 0));
     }
@@ -227,6 +237,7 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
       const Object* call_attr = cn->attrs.get();
       extractor.Extract(const_cast<Object*>(call_attr));
     } else if (const auto* fn = cn->op.as<FunctionNode>()) {
+      ICHECK(false);
       auto pattern = fn->GetAttr<String>(attr::kPartitionedFromPattern);
       ICHECK(pattern.defined());
       std::vector<std::string> values;
@@ -237,20 +248,98 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
     }
   }
 
+  std::vector<JSONGraphNodeEntry> VisitBinding_(const VarBindingNode* binding) {
+    ICHECK_EQ(memo_.count(binding->var), 0);
+    std::cout << "JSONGraphNode - visit VarBindingNode: " << binding->value << "\n";
+    memo_[binding->var] = VisitExpr(binding->value);
+    std::cout << "   - Binding value: " << binding->value << "\n";
+    return VisitExpr(binding->value);
+  }
+
+  std::vector<JSONGraphNodeEntry> VisitBinding_(const MatchShapeNode* binding) {
+    LOG(FATAL) << "JSON runtime currently doesn't shape expr\n";
+    return {};
+  }
+
+  std::vector<JSONGraphNodeEntry> VisitBinding(const Binding& binding) {
+    std::vector<JSONGraphNodeEntry> nodes;
+    if (const auto* node = binding.as<VarBindingNode>()) {
+      auto from_b = VisitBinding_(node);
+      nodes.insert(nodes.end(), from_b.begin(), from_b.end());
+    } else if (const auto* node = binding.as<MatchShapeNode>()) {
+      auto from_b = VisitBinding_(node);
+      nodes.insert(nodes.end(), from_b.begin(), from_b.end());
+    } else {
+      LOG(FATAL) << "TypeError: Invalid type: " << binding->GetTypeKey();
+    }
+    return nodes;
+  }
+
+  std::vector<JSONGraphNodeEntry> VisitBindingBlock(const BindingBlock& block) {
+    std::vector<JSONGraphNodeEntry> nodes;
+    if (const auto* node = block.as<DataflowBlockNode>()) {
+      auto from_bb = VisitBindingBlock_(node);
+      nodes.insert(nodes.end(), from_bb.begin(), from_bb.end());
+    } else if (const auto* node = block.as<BindingBlockNode>()) {
+      auto from_bb = VisitBindingBlock_(node);
+      nodes.insert(nodes.end(), from_bb.begin(), from_bb.end());
+    } else {
+      LOG(FATAL) << "TypeError: Invalid type: " << block->GetTypeKey();
+    }
+    return nodes;
+  }
+
+  std::vector<JSONGraphNodeEntry> VisitBindingBlock_(const BindingBlockNode* block) {
+    std::cout << "JSONGraphNode - visit bindingblocknode\n";
+    std::vector<JSONGraphNodeEntry> nodes;
+    for (Binding binding : block->bindings) {
+      auto from_b = VisitBinding(binding);
+      nodes.insert(nodes.end(), from_b.begin(), from_b.end());
+    }
+    return nodes;
+  }
+
+  std::vector<JSONGraphNodeEntry> VisitBindingBlock_(const DataflowBlockNode* block) {
+    std::cout << "JSONGraphNode - visit dataflowblocknode\n";
+    std::vector<JSONGraphNodeEntry> nodes;
+    for (Binding binding : block->bindings) {
+      auto from_b = VisitBinding(binding);
+      nodes.insert(nodes.end(), from_b.begin(), from_b.end());
+    }
+    return nodes;
+  }
+
+  std::vector<JSONGraphNodeEntry> VisitExpr_(const SeqExprNode* op) {
+    std::cout << "JSONGraphNode - visit seqnode\n";
+    std::vector<JSONGraphNodeEntry> nodes;
+    // auto t = this->VisitSpan(op->span);
+
+    std::cout << "JSONGraphNode - visit seqnode: binding blocks\n";
+    for (BindingBlock block : op->blocks) {
+      auto from_bb = VisitBindingBlock(block);
+      nodes.insert(nodes.end(), from_bb.begin(), from_bb.end());
+    }
+    std::cout << "JSONGraphNode - visit seqnode: op body\n";
+    auto from_body = VisitExpr(op->body);
+    nodes.insert(nodes.end(), from_body.begin(), from_body.end());
+
+    return nodes;
+  }
+
   std::vector<JSONGraphNodeEntry> VisitExprDefault_(const Object* op) {
     LOG(FATAL) << "JSON runtime currently doesn't support " << op->GetTypeKey();
     return {};
   }
 
   std::vector<JSONGraphNodeEntry> VisitExpr_(const VarNode* vn) {
-    std::cout << "JSONGraphNode - Varnode: " << vn << "\n";
+    std::cout << "Varnode: " << vn << "\n";
     ICHECK(memo_.count(GetRef<Expr>(vn)));
     return memo_[GetRef<Expr>(vn)];
   }
 
   std::vector<JSONGraphNodeEntry> VisitExpr_(const ConstantNode* cn) {
     std::string name = symbol_ + "_const_" + std::to_string(params_.size());
-    std::cout << "JSONGraphNode - Constnode: " << name << "\n";
+    std::cout << "Const node: " << name << "\n";
     params_.push_back(name);
     auto node = std::make_shared<JSONGraphNode>(name, "const" /* op_type_ */);
     return AddNode(node, GetRef<Expr>(cn));
@@ -266,8 +355,8 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
   }
 
   std::vector<JSONGraphNodeEntry> VisitExpr_(const CallNode* cn) {
-    std::cout << "JSONGraph - VisitExpr: " << cn << "\n";
     Expr expr = GetRef<Expr>(cn);
+    std::cout << "JSONGraphNode - visit callnode: " << expr << "\n";
     std::string name;
     if (const auto* op_node = cn->op.as<OpNode>()) {
       name = op_node->name;
@@ -280,7 +369,9 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
     }
 
     std::vector<JSONGraphNodeEntry> inputs;
+    std::cout << "    - # args: " << cn->args.size() << "\n";
     for (const auto& arg : cn->args) {
+      std::cout << "    - arg: " << arg << "\n";
       auto res = VisitExpr(arg);
       inputs.insert(inputs.end(), res.begin(), res.end());
     }
@@ -291,12 +382,14 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
     return AddNode(node, GetRef<Expr>(cn));
   }
 
+  /*
+  // TODO: How does relax handle LetNode?
   std::vector<JSONGraphNodeEntry> VisitExpr_(const LetNode* ln) {
-    std::cout << "JSONGraphNode - Letnode: " << ln << "\n";
     ICHECK_EQ(memo_.count(ln->var), 0);
     memo_[ln->var] = VisitExpr(ln->value);
     return VisitExpr(ln->body);
   }
+  */
 
   std::vector<JSONGraphNodeEntry> VisitExpr_(const TupleGetItemNode* gtn) {
     auto vtuple = VisitExpr(gtn->tuple);
@@ -306,6 +399,7 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
   std::vector<JSONGraphNodeEntry> VisitExpr_(const FunctionNode* fn) {
     ICHECK(fn->GetAttr<String>(attr::kComposite).defined())
         << "JSON runtime only supports composite functions";
+
     // FunctionNode should be handled by the caller.
     return {};
   }
@@ -352,6 +446,6 @@ class JSONSerializer : public MemoizedExprTranslator<std::vector<JSONGraphNodeEn
 
 }  // namespace contrib
 }  // namespace backend
-}  // namespace relay
+}  // namespace relax
 }  // namespace tvm
-#endif  // TVM_RELAY_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_
+#endif  // TVM_RELAX_BACKEND_CONTRIB_CODEGEN_JSON_CODEGEN_JSON_H_

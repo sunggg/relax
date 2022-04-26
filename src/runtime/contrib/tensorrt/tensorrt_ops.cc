@@ -1254,7 +1254,7 @@ const std::shared_ptr<std::unordered_map<std::string, std::shared_ptr<TensorRTOp
 GetOpConverters() {
   static auto map =
       std::make_shared<std::unordered_map<std::string, std::shared_ptr<TensorRTOpConverter>>>();
-  if (!map->empty()) return map;
+
   map->emplace("nn.relu", std::make_shared<ActivationOpConverter>());
   map->emplace("sigmoid", std::make_shared<ActivationOpConverter>());
   map->emplace("tanh", std::make_shared<ActivationOpConverter>());

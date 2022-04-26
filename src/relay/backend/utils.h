@@ -302,12 +302,15 @@ class MemoizedExprTranslator : public ::tvm::relay::ExprFunctor<OutputType(const
    */
   virtual OutputType VisitExpr(const Expr& n) {
     ICHECK(n.defined());
+    std::cout << "Memoized: " << n << "\n";
     auto it = memo_.find(n);
     if (it != memo_.end()) {
       return it->second;
     }
+    std::cout << "Memoized: Visit\n";
     auto res = BaseFunctor::VisitExpr(n);
     memo_[n] = res;
+    std::cout << "Memoized: Done\n";
     return res;
   }
 

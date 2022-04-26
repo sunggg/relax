@@ -275,7 +275,11 @@ Expr ExprMutator::VisitExpr_(const FunctionNode* op) {
   if (all_params_unchanged && ret_type.same_as(op->ret_type) && body.same_as(op->body)) {
     return GetRef<Expr>(op);
   } else {
+<<<<<<< HEAD
     return Function(params, body, ret_type, op->attrs);
+=======
+    return Function(op->name, params, body, ret_type, op->attrs);
+>>>>>>> [WIP] TRT codegen works. Need to rewrite the call to point the packed func
   }
 }
 
