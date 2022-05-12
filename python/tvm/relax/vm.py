@@ -185,6 +185,7 @@ def build(mod: tvm.IRModule, target: tvm.target.Target, ext_libs=None, params=di
     # split primfunc and relax function
     rx_mod, ext_mod, tir_mod = _split_mod(new_mod)
 
+    """
     if ext_libs is None:
         ext_libs = []
         for gv in ext_mod.get_global_vars():
@@ -197,8 +198,9 @@ def build(mod: tvm.IRModule, target: tvm.target.Target, ext_libs=None, params=di
 
             ext_lib = codegen(_ext_mod)
             ext_libs.append(ext_lib)
-
+    """
     lib = tvm.build(tir_mod, target=target)
+    # TODO: retrive ext_libs
     return Executable(_ffi_api.VMCodeGen(rx_mod, lib, ext_libs, params))
 
 
