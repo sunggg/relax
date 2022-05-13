@@ -137,7 +137,7 @@ class VirtualMachine(object):
         return self.module[key]
 
 
-def build(mod: tvm.IRModule, target: tvm.target.Target, ext_libs=None, params=dict()) -> Executable:
+def build(mod: tvm.IRModule, target: tvm.target.Target, params=dict()) -> Executable:
     """
     Build an IRModule to VM executable.
 
@@ -175,51 +175,41 @@ def build(mod: tvm.IRModule, target: tvm.target.Target, ext_libs=None, params=di
         target = tvm.target.Target("llvm", host="llvm")
         ex = relax.vm.build(mod, target)
     """
+    ext_libs = None
+    if mod.attrs and "external_mods" in mod.attrs:
+        ext_libs = mod.attrs["external_mods"]
+
     passes = [relax.transform.ToNonDataflow()]
     passes.append(relax.transform.CallTIRRewrite())
     passes.append(relax.transform.VMMemoryLower())
+    # TODO(sunggg): IRModule losts its attr after VMShapeLower(). fix this.
     passes.append(relax.transform.VMShapeLower())
     seq = tvm.transform.Sequential(passes)
     new_mod = seq(mod)
 
+    # assert new_mod.attrs
+    # assert new_mod.attrs and "external_mods" in new_mod.attrs
+
     # split primfunc and relax function
-    rx_mod, ext_mod, tir_mod = _split_mod(new_mod)
-
-    """
-    if ext_libs is None:
-        ext_libs = []
-        for gv in ext_mod.get_global_vars():
-            _ext_mod = ext_mod[gv]
-            attrs = _ext_mod.attrs
-            assert (attrs) and ("Codegen" in attrs) and ("global_symbol" in attrs)
-            codegen_name, new_sym = attrs["Codegen"], attrs["global_symbol"]
-            codegen = tvm.get_global_func(f"relax.ext.{codegen_name}", True)
-            assert codegen
-
-            ext_lib = codegen(_ext_mod)
-            ext_libs.append(ext_lib)
-    """
+    rx_mod, tir_mod = _split_mod(new_mod)
     lib = tvm.build(tir_mod, target=target)
-    # TODO: retrive ext_libs
+
     return Executable(_ffi_api.VMCodeGen(rx_mod, lib, ext_libs, params))
 
 
 def _split_mod(mod: tvm.IRModule) -> Tuple[tvm.IRModule, tvm.IRModule]:
     rx_mod = IRModule({})
     tir_mod = IRModule({})
-    ext_mod = IRModule({})
+
     for gv in mod.get_global_vars():
         if isinstance(mod[gv], PrimFunc):
             tir_mod[gv] = mod[gv]
         elif isinstance(mod[gv], relax.Function):
-            if mod[gv].attrs and mod[gv].attrs["Codegen"] != "default":
-                ext_mod[gv] = mod[gv]
-            else:
-                rx_mod[gv] = mod[gv]
+            rx_mod[gv] = mod[gv]
         else:
             raise TypeError(
                 "IRModule is expected to contain PrimFunc or Function, but gets {}".format(
                     type(mod[gv])
                 )
             )
-    return rx_mod, ext_mod, tir_mod
+    return rx_mod, tir_mod

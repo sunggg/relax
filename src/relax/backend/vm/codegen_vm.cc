@@ -72,6 +72,7 @@ class CodeGenVM : public ExprFunctor<Instruction::Arg(const Expr&)> {
   Instruction::Arg VisitExpr_(const FunctionNode* func_node) {
     Optional<String> gsymbol = func_node->GetAttr<String>(tvm::attr::kGlobalSymbol);
     if (gsymbol.defined()) {
+      std::cout << "Func_node params: " << func_node->params.size() << "\n";
       builder_->EmitFunction(gsymbol.value(), func_node->params.size());
     } else {
       // TODO(@yuchen): handle local functions that capture local vars outside the func

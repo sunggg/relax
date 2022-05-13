@@ -317,7 +317,7 @@ class JSONSerializer
     std::cout << "JSONGraphNode - visit seqnode: binding blocks\n";
     for (BindingBlock block : op->blocks) {
       auto from_bb = VisitBindingBlock(block);
-      nodes.insert(nodes.end(), from_bb.begin(), from_bb.end());
+      // nodes.insert(nodes.end(), from_bb.begin(), from_bb.end());
     }
     std::cout << "JSONGraphNode - visit seqnode: op body\n";
     auto from_body = VisitExpr(op->body);

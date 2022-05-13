@@ -80,6 +80,7 @@ PackedFunc VirtualMachine::GetFunction(const std::string& name,
       for (int i = 0; i < args.size(); ++i) {
         inputs[i] = args[i];
       }
+      std::cout << "Arg num: " << args.size() << "\n";
       *rv = this->Invoke(gf_idx, inputs);
     });
   } else {
