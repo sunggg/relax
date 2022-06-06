@@ -40,6 +40,9 @@ from tvm.relax.transform.tuning import (
     default_evaluate,
     select_best_candidate,
     get_trace,
+    load_choice_from_json,
+    load_knob_from_json,
+    load_trace_from_json,
 )
 
 
@@ -127,46 +130,24 @@ def mock_evaluate(candidates: List[Trace], target_str: str, ctx: PassContext):
     ctx.inc_num_evals(num_evals)
 
 
-# Mock tuning pass that determines whether to apply relax.transform.FoldConstant().
-# Each pass invocation will generate two candidates for the incoming IRModule.
-# In relax pass infra, each pass will define its own way of generating candidates and evaluating them without needing to know how other passes generate its candidate and evaluate them.
-# This will significantly alleviate the development process since it is known to be HARD problem to consider the interaction with (potentially hundreds of) other passes.
-@ir.transform.module_pass(opt_level=0, traceable=True)
-class MockConstFoldingTuningPass(transform.Pass):
-    def __init__(
-        self,
-        f_generate_candidate=None,
-        f_evaluate=mock_evaluate,
-        eval_passes: List[transform.Pass] = None,
-        required: List[transform.Pass] = [],
-    ):
-        self.f_generate_candidate = (
-            f_generate_candidate if f_generate_candidate else default_generate_candidate
-        )
-        self.f_evaluate = f_evaluate if f_evaluate else default_evaluate
-        self.eval_passes = eval_passes
-        self.required = required
+# Define a choice by using FoldConstant pass.
+@tvm.register_func("testing.apply_fold_constant")
+def apply_fold_constant(mod):
+    return relax.transform.FoldConstant()(mod)
 
-    def transform_module(self, mod: IRModule, ctx: PassContext) -> IRModule:
-        trace = ctx.pop_trace()
 
-        def apply(mod):
-            return relax.transform.FoldConstant()(mod)
+@tvm.register_func("testing.add_global_symbol")
+def add_global_symbol(mod, func_name, global_symbol):
+    mod[func_name] = mod[func_name].with_attr("global_symbol", global_symbol)
+    return mod
 
-        def noapply(mod):
-            return mod
 
-        # Create mock choices for testing.
-        choices = {"apply": Choice(apply), "noapply": Choice(noapply)}
-        # Tuning pass manages a set of transformation functions registered via knob.
-        knob = Knob("MockTuningKnob", choices)
-
-        candidates = self.f_generate_candidate([knob], trace, self.eval_passes)
-        self.f_evaluate(candidates, "llvm", ctx)
-        best_trace = select_best_candidate(candidates)
-
-        ctx.push_trace(best_trace)
-        return best_trace.out_mod
+@tvm.register_func("testing.check_num_functions")
+def check_num_funcs(mod, N):
+    # Explicit type specification is necessary.
+    # Otherwise, PackedFunc cannot derive the return type correctly.
+    # e.g., Check failed: type_code_ == kDLInt (8 vs. 0) : expected int but got Object
+    return bool(len(mod.functions) == N)
 
 
 def test_choice():
@@ -176,30 +157,77 @@ def test_choice():
         expected,
     ) = setup_test_const_folding()
 
-    # Define a choice by using FoldConstant pass.
-    # TODO(sunggg): This wrapper seems necessary. Figure out why.
-    def apply(mod):
-        return relax.transform.FoldConstant()(mod)
-
-    choice = Choice(apply)
-
+    # Without any argument, default setting will be used for both transformation and constraint functions.
+    # default transformation function will return the original IRModule without any change.
+    choice = Choice(
+        # - f_transform_key="relax.transform.Choice.f_default_transform"
+        # - f_constr_key="relax.transform.Choice.f_default_constr")
+    )
     # Load transformation function from the choice and apply it.
-    after = choice.get_transform_func()(before)
+    after = choice.apply_transform_func(before)
+    tvm.ir.assert_structural_equal(after, before)
+
+    choice = Choice("testing.apply_fold_constant")
+    # Load transformation function from the choice and apply it.
+    after = choice.apply_transform_func(before)
     tvm.ir.assert_structural_equal(after, expected)
+
+    # Create a choice that tags global symbol onto target function.
+    choice = Choice("testing.add_global_symbol", ["addone", "test-symbol"])
+    after = choice.apply_transform_func(before)
+    assert after["addone"].attrs is not None
+    assert after["addone"].attrs["global_symbol"] == "test-symbol"
+    # The transformation should be applied with Copy-On-Write.
+    # So, the original module should be unchanged.
+    assert before["addone"].attrs is None
+
+    # Test choice with impossible constraint
+    choice = Choice(
+        f_transform_key="testing.add_global_symbol",
+        f_transform_args=["addone", "test-symbol"],
+        f_constr_key="testing.check_num_functions",
+        f_constr_args=[1000],
+    )
+    # Since the constraint is not met, it should return the original function
+    after = choice.apply_transform_func(before)
+    assert after["addone"].attrs is None
+
+    # Test choice with the proper constraint
+    choice = Choice(
+        f_transform_key="testing.add_global_symbol",
+        f_transform_args=["addone", "test-symbol"],
+        f_constr_key="testing.check_num_functions",
+        f_constr_args=[2],
+    )
+    # Since the constraint is not met, it should return the original function
+    after = choice.apply_transform_func(before)
+    assert after["addone"].attrs is not None
+    assert after["addone"].attrs["global_symbol"] == "test-symbol"
+    # The original module should be unchanged.
+    assert before["addone"].attrs is None
+
+    # Test roundtrip.
+    # Export as JSON.
+    json_obj = choice.as_json()
+    # Import JSON.
+    new_choice = load_choice_from_json(json_obj)
+    # Test imported choice
+    after = new_choice.apply_transform_func(before)
+    assert after["addone"].attrs is not None
+    assert after["addone"].attrs["global_symbol"] == "test-symbol"
+    # The original module should be unchanged.
+    assert before["addone"].attrs is None
 
 
 def test_knob():
     # Test setup.
     before, expected = setup_test_const_folding()
 
-    def apply(mod):
-        return relax.transform.FoldConstant()(mod)
-
-    def noapply(mod):
-        return mod
-
     # Users can define a set of choices with list.
-    choices = [Choice(apply), Choice(noapply)]
+    choices = [
+        Choice("testing.apply_fold_constant"),
+        Choice(),
+    ]
 
     # Define knob.
     knob = Knob("TestKnob", choices)
@@ -211,34 +239,69 @@ def test_knob():
     # Check the sanity of each decision.
     after_apply = knob.apply(before, 0)
     after_noapply = knob.apply(before, 1)
+
     tvm.ir.assert_structural_equal(after_apply, expected)
     tvm.ir.assert_structural_equal(after_noapply, before)
 
     # Users can define a set of choices with dict.
-    choices = {"apply": Choice(apply), "noapply": Choice(noapply)}
+    choices = {
+        "apply": Choice("testing.apply_fold_constant"),
+        "noapply": Choice(),
+        "apply_with_impossible_constr": Choice(
+            f_transform_key="testing.apply_fold_constant",
+            f_constr_key="testing.check_num_functions",
+            f_constr_args=[1000],
+        ),
+    }
     # Define knob.
     knob = Knob("TestKnob", choices)
     assert knob.verify("apply")
     assert knob.verify("noapply")
+    assert knob.verify("apply_with_impossible_constr")
     assert not knob.verify("INVLAID")
 
     after_apply = knob.apply(before, "apply")
     after_noapply = knob.apply(before, "noapply")
+    # Because constr was not satisfied, it will return the original IRModule
+    after_apply_with_constr = knob.apply(before, "apply_with_impossible_constr")
     tvm.ir.assert_structural_equal(after_apply, expected)
     tvm.ir.assert_structural_equal(after_noapply, before)
+    tvm.ir.assert_structural_equal(after_apply_with_constr, before)
+
+    # Test roundtrip.
+    # Export as JSON.
+    json_obj = knob.as_json()
+    # Import JSON.
+    new_knob = load_knob_from_json(json_obj)
+    assert new_knob.name == knob.name
+    # Test imported knob
+    assert new_knob.verify("apply")
+    assert new_knob.verify("noapply")
+    assert new_knob.verify("apply_with_impossible_constr")
+    assert not new_knob.verify("INVLAID")
+
+    after_apply = new_knob.apply(before, "apply")
+    after_noapply = new_knob.apply(before, "noapply")
+    # Because constr was not satisfied, it will return the original IRModule
+    after_apply_with_constr = knob.apply(before, "apply_with_impossible_constr")
+    tvm.ir.assert_structural_equal(after_apply, expected)
+    tvm.ir.assert_structural_equal(after_noapply, before)
+    tvm.ir.assert_structural_equal(after_apply_with_constr, before)
 
 
 def test_trace():
     before, expected = setup_test_const_folding()
 
-    def apply(mod):
-        return relax.transform.FoldConstant()(mod)
-
-    def noapply(mod):
-        return mod
-
     # Define choices and its knob.
-    choices = {"apply": Choice(apply), "noapply": Choice(noapply)}
+    choices = {
+        "apply": Choice(
+            f_transform_key="testing.apply_fold_constant",
+            f_transform_args=[],
+            f_constr_key="testing.check_num_functions",
+            f_constr_args=[2],
+        ),
+        "noapply": Choice(),
+    }
     knob = Knob("TestKnob", choices)
 
     # Define a Trace with empty decision (transformation) history.
@@ -272,6 +335,15 @@ def test_trace():
     # Should be initalized when new knob is applied.
     assert trace.perf == -1
 
+    # Test roundtrip.
+    # Export as JSON.
+    json_obj = trace.as_json()
+    # Import JSON.
+    new_trace = load_trace_from_json(json_obj)
+    tvm.ir.assert_structural_equal(trace.in_mod, new_trace.in_mod)
+    assert new_trace.size == 3
+    tvm.ir.assert_structural_equal(trace.out_mod, new_trace.out_mod)
+
 
 def test_trace_wrapper():
     mod = MyModule
@@ -282,18 +354,48 @@ def test_trace_wrapper():
     assert isinstance(get_trace(mod["addone"]), Trace)
 
 
+# Mock tuning pass that determines whether to apply relax.transform.FoldConstant().
+# Each pass invocation will generate two candidates for the incoming IRModule.
+# In relax pass infra, each pass will define its own way of generating candidates and evaluating them without needing to know how other passes generate its candidate and evaluate them.
+# This will significantly alleviate the development process since it is known to be HARD problem to consider the interaction with (potentially hundreds of) other passes.
+@ir.transform.module_pass(opt_level=0, traceable=True)
+class MockConstFoldingTuningPass(transform.Pass):
+    def __init__(
+        self,
+        f_generate_candidate=None,
+        f_evaluate=mock_evaluate,
+        eval_passes: List[transform.Pass] = None,
+        required: List[transform.Pass] = [],
+    ):
+        self.f_generate_candidate = (
+            f_generate_candidate if f_generate_candidate else default_generate_candidate
+        )
+        self.f_evaluate = f_evaluate if f_evaluate else default_evaluate
+        self.eval_passes = eval_passes
+        self.required = required
+
+    def transform_module(self, mod: IRModule, ctx: PassContext) -> IRModule:
+        trace = ctx.pop_trace()
+
+        # Create mock choices for testing.
+        choices = {"apply": Choice("testing.apply_fold_constant"), "noapply": Choice()}
+        # Tuning pass manages a set of transformation functions registered via knob.
+        knob = Knob("MockTuningKnob", choices)
+
+        candidates = self.f_generate_candidate([knob], trace, self.eval_passes)
+        self.f_evaluate(candidates, "llvm", ctx)
+        best_trace = select_best_candidate(candidates)
+
+        ctx.push_trace(best_trace)
+        return best_trace.out_mod
+
+
 def test_default_functions():
     mod = MyModule
     assert isinstance(mod, tvm.IRModule)
 
-    def apply(mod):
-        return relax.transform.FoldConstant()(mod)
-
-    def noapply(mod):
-        return mod
-
     # Define choice, knob, trace.
-    choices = {"apply": Choice(apply), "noapply": Choice(noapply)}
+    choices = {"apply": Choice("testing.apply_fold_constant"), "noapply": Choice()}
     knob = Knob("TestKnob", choices)
     trace = Trace(mod)
 
@@ -371,10 +473,14 @@ def test_pass_context():
     # With binding, the heuristic pass implicitly performs TIR passes (prob for constant evaluation).
     # If make_traceable is not provided, the pass infra will make every non-traceable pass traceable by default.
     seq = transform.Sequential([HeuristicPass()])
-    with transform.PassContext(trace=Trace(mod)):
+    with transform.PassContext(
+        trace=Trace(mod),
+    ):
         _ = seq(mod)
         assert PassContext.current().get_trace_stack_size() == 1
-        assert PassContext.current().get_current_trace().size == 57
+        # This number might change as TVM develops more passes.
+        # So, just check rough number for the sanity check.
+        assert PassContext.current().get_current_trace().size > 10
 
     # We can explicitly specify which pass we want to keep track of.
     with transform.PassContext(trace=Trace(mod), make_traceable=["FoldConstant"]):
@@ -577,11 +683,8 @@ def test_passes_with_mixed_granularities():
     ) -> IRModule:
         trace = ctx.pop_trace()
 
-        def noapply(mod):
-            return mod
-
         # Create mock choices for testing
-        choices = [Choice(noapply), Choice(noapply), Choice(noapply)]
+        choices = [Choice(), Choice(), Choice()]
         # Tuning pass manages a set of transformation functions registered via knob.
         knob = Knob("MockTuningKnob", choices)
 
@@ -637,6 +740,42 @@ def test_passes_with_mixed_granularities():
         # Trace length and num eval can be different depending on how each function/dataflow block is treated.
 
 
+@tvm.register_func("testing.meta_schedule_tuning_module")
+def meta_schedule_tuning_module(mod, target_str):
+    target = ms.tune.Parse._target(target_str)
+    config = ms.TuneConfig(
+        strategy="evolutionary",
+        num_trials_per_iter=2,
+        max_trials_per_task=4,
+        max_trials_global=4,
+    )
+    database = DummyDatabase()
+    with tempfile.TemporaryDirectory() as work_dir:
+        extracted_tasks = ms.relax_integration.extract_task_from_relax(mod, target)
+        database = ms.tune.tune_extracted_tasks(
+            extracted_tasks, config, work_dir, database=database
+        )
+
+        return relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)
+
+
+@tvm.register_func("testing.meta_schedule_tuning_primfunc")
+def meta_schedule_tuning_primfunc(mod, target_str):
+
+    target = ms.tune.Parse._target(target_str)
+    config = ms.TuneConfig(
+        strategy="evolutionary",
+        num_trials_per_iter=2,
+        max_trials_per_task=4,
+        max_trials_global=4,
+    )
+    database = DummyDatabase()
+
+    with tempfile.TemporaryDirectory() as work_dir:
+        ms.tune.tune_tir(mod, target, config, work_dir, database=database)
+        return relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)
+
+
 def test_metaschedule_tuning():
     @tvm.script.ir_module
     class InputModule:
@@ -687,24 +826,8 @@ def test_metaschedule_tuning():
     def MockMetaSchedTuningPass1(mod: IRModule, ctx: PassContext) -> IRModule:
         trace = ctx.pop_trace()
 
-        def meta_schedule_tuning(mod):
-            target = ms.tune.Parse._target(target_str)
-            config = ms.TuneConfig(
-                strategy="evolutionary",
-                num_trials_per_iter=2,
-                max_trials_per_task=4,
-                max_trials_global=4,
-            )
-            with tempfile.TemporaryDirectory() as work_dir:
-                extracted_tasks = ms.relax_integration.extract_task_from_relax(mod, target)
-                database = ms.tune.tune_extracted_tasks(
-                    extracted_tasks, config, work_dir, database=DummyDatabase()
-                )
-
-                return relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)
-
         # We can create a choice with tuning-based transformation as well.
-        choices = [Choice(meta_schedule_tuning)]
+        choices = [Choice("testing.meta_schedule_tuning_module", [target_str])]
         # Tuning pass manages a set of transformation functions registered via knob.
         knob = Knob("MockMetaSched", choices)
 
@@ -725,24 +848,13 @@ def test_metaschedule_tuning():
     @tir.transform.prim_func_pass(opt_level=0, traceable=True)
     def MockMetaSchedTuningPass2(func: PrimFunc, mod: IRModule, ctx: PassContext) -> IRModule:
         trace = ctx.pop_trace()
-        new_mod = IRModule.from_expr(func)
+
+        # Setup Meta Schedule tuning
+        new_mod = ms.tune.Parse._mod(func)
         trace = Trace(new_mod)
 
-        def meta_schedule_tuning(mod):
-            target = ms.tune.Parse._target(target_str)
-            config = ms.TuneConfig(
-                strategy="evolutionary",
-                num_trials_per_iter=2,
-                max_trials_per_task=4,
-                max_trials_global=4,
-            )
-            with tempfile.TemporaryDirectory() as work_dir:
-                database = DummyDatabase()
-                ms.tune.tune_tir(mod, target, config, work_dir, database=database)
-                return relax.transform.MetaScheduleApplyHistoryBest(database, target)(mod)
-
         # We can create a choice with tuning-based transformation as well.
-        choices = [Choice(meta_schedule_tuning)]
+        choices = [Choice("testing.meta_schedule_tuning_primfunc", [target_str])]
         # Tuning pass manages a set of transformation functions registered via knob.
         knob = Knob("MockMetaSched", choices)
 

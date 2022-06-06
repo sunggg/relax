@@ -20,6 +20,7 @@
 #define TVM_META_SCHEDULE_DATABASE_H_
 
 #include <tvm/meta_schedule/arg_info.h>
+#include <tvm/relax/tuning.h>
 #include <tvm/target/target.h>
 #include <tvm/tir/schedule/trace.h>
 
@@ -306,6 +307,47 @@ class Database : public runtime::ObjectRef {
 };
 
 }  // namespace meta_schedule
+
+namespace relax {
+/*! \brief The class of tuning records. */
+class TuningRecordNode : public meta_schedule::TuningRecordNode {
+ public:
+  /*! \brief The trace tuned */
+  Trace trace;
+  void VisitAttrs(tvm::AttrVisitor* v) { v->Visit("trace", &trace); }
+  static constexpr const char* _type_key = "relax.transform.TuningRecord";
+  TVM_DECLARE_FINAL_OBJECT_INFO(TuningRecordNode, runtime::Object);
+};
+
+/*!
+ * \brief The managed reference of TuningRecordNode.
+ * \sa TuningRecordNode
+ */
+class TuningRecord : public runtime::ObjectRef {
+ public:
+  /*!
+   \brief Constructor of a tuning record.
+   \param trace The trace of the tuning record.
+   \param run_secs The running time of the tuning record.
+   \param workload The workload of the tuning record.
+   \param target The target of the tuning record.
+   \param args_info The argument information of the tuning record.
+  */
+  TVM_DLL explicit TuningRecord(Trace trace, Array<FloatImm> run_secs,
+                                meta_schedule::Workload workload, tvm::Target target,
+                                Array<meta_schedule::ArgInfo> args_info);
+  /*!
+   * \brief Create a tuning record from a json object.
+   * \param json_obj The json object.
+   * \param workload The workload.
+   * \return The tuning record created.
+   */
+  TVM_DLL static TuningRecord FromJSON(const ObjectRef& json_obj,
+                                       const meta_schedule::Workload& workload);
+  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(TuningRecord, runtime::ObjectRef, TuningRecordNode);
+};
+
+}  // namespace relax
 }  // namespace tvm
 
 #endif  // TVM_META_SCHEDULE_DATABASE_H_

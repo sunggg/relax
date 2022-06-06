@@ -27,34 +27,80 @@
 #include "../../../meta_schedule/utils.h"
 namespace tvm {
 namespace relax {
-TVM_REGISTER_NODE_TYPE(ChoiceNode);
 
-Choice::Choice(FTransform f_transform, FConstr f_constr) {
-  ICHECK(f_transform != nullptr) << "Transformation function should be defined.";
-  if (f_constr == nullptr) {
-    f_constr = [=](IRModule m) { return true; };
-  }
-
+Choice::Choice(String f_transform_key, Array<ObjectRef> f_transform_args, String f_constr_key,
+               Array<ObjectRef> f_constr_args) {
   ObjectPtr<ChoiceNode> n = make_object<ChoiceNode>();
-  n->f_transform = std::move(f_transform);
-  n->f_constr = std::move(f_constr);
+  n->f_transform_key = std::move(f_transform_key);
+  n->f_transform_args = std::move(f_transform_args);
+  n->f_constr_key = std::move(f_constr_key);
+  n->f_constr_args = std::move(f_constr_args);
   data_ = std::move(n);
 }
 
-TVM_REGISTER_GLOBAL("relax.transform.Choice")
-    .set_body_typed([](FTransform f_transform, FConstr f_constr) {
-      return Choice(f_transform, f_constr);
-    });
+// TODO (sunggg): Currently, it only supports an array of primitive data types.
+ObjectRef ChoiceNode::AsJSON() const {
+  Array<ObjectRef> json_transfrom_args, json_constr_args;
+  for (ObjectRef arg : this->f_transform_args) {
+    std::string json_arg = tvm::SaveJSON(arg);
+    std::string b64_arg = meta_schedule::Base64Encode(json_arg);
+    json_transfrom_args.push_back(String(b64_arg));
+  }
+  for (ObjectRef arg : this->f_constr_args) {
+    std::string json_arg = tvm::SaveJSON(arg);
+    std::string b64_arg = meta_schedule::Base64Encode(json_arg);
+    json_constr_args.push_back(String(b64_arg));
+  }
+  return Array<ObjectRef>{
+      this->f_transform_key,
+      json_transfrom_args,
+      this->f_constr_key,
+      json_constr_args,
+  };
+}
 
-TVM_REGISTER_GLOBAL("relax.transform.ChoiceGetTransformFunc")
-    .set_body_method<Choice>(&ChoiceNode::GetTransformFunc);
+Choice LoadChoiceFromJSON(ObjectRef json) {
+  // Parse `json` into `choice`
+  String f_transform_key, f_constr_key;
+  Array<ObjectRef> f_transform_args, f_constr_args;
+  try {
+    const ArrayNode* arr = json.as<ArrayNode>();
+    ICHECK(arr && arr->size() == 4);
+    const auto* arr0 = arr->at(0).as<StringObj>();
+    const auto* arr1 = arr->at(1).as<ArrayNode>();
+    const auto* arr2 = arr->at(2).as<StringObj>();
+    const auto* arr3 = arr->at(3).as<ArrayNode>();
+    ICHECK(arr0 && arr1 && arr2 && arr3);
+    f_transform_key = GetRef<String>(arr0);
+    {
+      f_transform_args.reserve(arr1->size());
+      for (const ObjectRef& elem : *arr1) {
+        String b64_arg = Downcast<String>(elem);
+        std::string json_arg = meta_schedule::Base64Decode(b64_arg);
+        ObjectRef arg = LoadJSON(json_arg);
+        f_transform_args.push_back(arg);
+      }
+    }
+    f_constr_key = GetRef<String>(arr2);
+    {
+      f_constr_args.reserve(arr3->size());
+      for (const ObjectRef& elem : *arr3) {
+        String b64_arg = Downcast<String>(elem);
+        std::string json_arg = meta_schedule::Base64Decode(b64_arg);
+        ObjectRef arg = LoadJSON(json_arg);
+        f_constr_args.push_back(arg);
+      }
+    }
 
-TVM_REGISTER_GLOBAL("relax.transform.ChoiceGetConstrFunc")
-    .set_body_method<Choice>(&ChoiceNode::GetConstrFunc);
-TVM_REGISTER_GLOBAL("relax.transform.ChoiceCheckConstr")
-    .set_body_method<Choice>(&ChoiceNode::CheckConstr);
+  } catch (const tvm::Error& e) {
+    LOG(FATAL)
+        << "ValueError: The json entry of a choice should contain a set of two strings, but gets: "
+        << json;
+    throw;
+  }
+  return Choice(f_transform_key, f_transform_args, f_constr_key, f_constr_args);
+}
 
-TVM_REGISTER_NODE_TYPE(KnobNode);
 Knob::Knob(String name, Map<String, Choice> choices) {
   ObjectPtr<KnobNode> n = make_object<KnobNode>();
   n->name = std::move(name);
@@ -62,13 +108,42 @@ Knob::Knob(String name, Map<String, Choice> choices) {
   data_ = std::move(n);
 }
 
-TVM_REGISTER_GLOBAL("relax.transform.Knob")
-    .set_body_typed([](String name, Map<String, Choice> choices) { return Knob(name, choices); });
+ObjectRef KnobNode::AsJSON() const {
+  Map<String, ObjectRef> json_choices;
+  for (auto const& x : choices) {
+    json_choices.Set(x.first, x.second->AsJSON());
+  }
+  return Array<ObjectRef>{
+      /* 0: name    */ std::move(name),
+      /* 1: choices */ std::move(json_choices),
+  };
+}
 
-TVM_REGISTER_GLOBAL("relax.transform.KnobVerify").set_body_method<Knob>(&KnobNode::Verify);
-TVM_REGISTER_GLOBAL("relax.transform.KnobApply").set_body_method<Knob>(&KnobNode::Apply);
+Knob LoadKnobFromJSON(ObjectRef json) {
+  // Parse `json` into `name` and `choices`
+  String name;
+  Map<String, Choice> choices;
+  try {
+    const ArrayNode* arr = json.as<ArrayNode>();
+    ICHECK(arr && arr->size() == 2);
+    const auto* arr0 = arr->at(0).as<StringObj>();
+    const auto* arr1 = arr->at(1).as<MapNode>();
+    ICHECK(arr0 && arr1);
+    name = GetRef<String>(arr0);
+    for (auto const& x : GetRef<Map<String, ObjectRef>>(arr1)) {
+      String decision = x.first;
+      Choice choice = LoadChoiceFromJSON(x.second);
+      choices.Set(decision, choice);
+    }
+  } catch (const tvm::Error& e) {
+    LOG(FATAL)
+        << "ValueError: The json entry of a choice should contain a set of two strings, but gets: "
+        << json;
+    throw;
+  }
+  return Knob(name, choices);
+}
 
-TVM_REGISTER_NODE_TYPE(TraceNode);
 Trace::Trace(IRModule in_mod, Array<Knob> knobs, Array<String> decisions) {
   ICHECK(knobs.size() == decisions.size()) << "Size of knobs and decisions should match";
   // Deep-copy IRModule
@@ -88,6 +163,93 @@ Trace::Trace(IRModule in_mod, Array<Knob> knobs, Array<String> decisions) {
   data_ = std::move(n);
 }
 
+ObjectRef TraceNode::AsJSON() const {
+  ICHECK(this->Verify()) << "Trace should be valid";
+  std::string json_mod = tvm::SaveJSON(this->in_mod);
+  std::string b64_mod = meta_schedule::Base64Encode(json_mod);
+
+  Array<ObjectRef> json_knobs;
+  Array<ObjectRef> json_decisions;
+
+  int size = this->size;
+  json_knobs.reserve(size);
+  json_decisions.reserve(size);
+
+  for (int i = 0; i < size; i++) {
+    const Knob& knob = this->knobs[i];
+    const String& decision = this->decisions[i];
+
+    json_knobs.push_back(knob->AsJSON());
+    json_decisions.push_back(decision);
+  }
+
+  return Array<ObjectRef>{String(b64_mod), json_knobs, json_decisions};
+}
+
+Trace LoadTraceFromJSON(ObjectRef json) {
+  // Parse `json` into `trace`
+  IRModule in_mod;
+  Array<Knob> knobs;
+  Array<String> decisions;
+  try {
+    const ArrayNode* arr = json.as<ArrayNode>();
+    ICHECK(arr && arr->size() == 3);
+    const auto* arr0 = arr->at(0).as<StringObj>();
+    const auto* arr1 = arr->at(1).as<ArrayNode>();
+    const auto* arr2 = arr->at(2).as<ArrayNode>();
+    ICHECK(arr0 && arr1 && arr2);
+
+    String b64_mod = GetRef<String>(arr0);
+    std::string json_mod = meta_schedule::Base64Decode(b64_mod);
+    in_mod = Downcast<IRModule>(LoadJSON(json_mod));
+
+    for (const ObjectRef& elem : *arr1) {
+      knobs.push_back(LoadKnobFromJSON(elem));
+    }
+
+    for (const ObjectRef& elem : *arr2) {
+      decisions.push_back(Downcast<String>(elem));
+    }
+  } catch (const tvm::Error& e) {
+    LOG(FATAL)
+        << "ValueError: The json entry of a choice should contain a set of two strings, but gets: "
+        << json;
+    throw;
+  }
+  return Trace(in_mod, knobs, decisions);
+}
+
+/**************** FFI ****************/
+TVM_REGISTER_NODE_TYPE(ChoiceNode);
+TVM_REGISTER_GLOBAL("relax.transform.Choice")
+    .set_body_typed([](String f_transform_key, Array<ObjectRef> f_transform_args,
+                       String f_constr_key, Array<ObjectRef> f_constr_args) {
+      return Choice(f_transform_key, f_transform_args, f_constr_key, f_constr_args);
+    });
+TVM_REGISTER_GLOBAL("relax.transform.ChoiceAsJSON").set_body_method<Choice>(&ChoiceNode::AsJSON);
+TVM_REGISTER_GLOBAL("relax.transform.ChoiceFromJSON").set_body_typed([](ObjectRef json) {
+  return LoadChoiceFromJSON(json);
+});
+TVM_REGISTER_GLOBAL("relax.transform.ChoiceGetTransformFunc")
+    .set_body_method<Choice>(&ChoiceNode::GetTransformFunc);
+TVM_REGISTER_GLOBAL("relax.transform.ChoiceGetConstrFunc")
+    .set_body_method<Choice>(&ChoiceNode::GetConstrFunc);
+TVM_REGISTER_GLOBAL("relax.transform.ChoiceApplyTransformFunc")
+    .set_body_method<Choice>(&ChoiceNode::ApplyTransformFunc);
+TVM_REGISTER_GLOBAL("relax.transform.ChoiceCheckConstr")
+    .set_body_method<Choice>(&ChoiceNode::CheckConstr);
+
+TVM_REGISTER_NODE_TYPE(KnobNode);
+TVM_REGISTER_GLOBAL("relax.transform.Knob")
+    .set_body_typed([](String name, Map<String, Choice> choices) { return Knob(name, choices); });
+TVM_REGISTER_GLOBAL("relax.transform.KnobAsJSON").set_body_method<Knob>(&KnobNode::AsJSON);
+TVM_REGISTER_GLOBAL("relax.transform.KnobFromJSON").set_body_typed([](ObjectRef json) {
+  return LoadKnobFromJSON(json);
+});
+TVM_REGISTER_GLOBAL("relax.transform.KnobVerify").set_body_method<Knob>(&KnobNode::Verify);
+TVM_REGISTER_GLOBAL("relax.transform.KnobApply").set_body_method<Knob>(&KnobNode::Apply);
+
+TVM_REGISTER_NODE_TYPE(TraceNode);
 TVM_REGISTER_GLOBAL("relax.transform.Trace")
     .set_body_typed([](IRModule in_mod, Array<Knob> knobs, Array<String> decisions) {
       return Trace(in_mod, knobs, decisions);
@@ -95,5 +257,12 @@ TVM_REGISTER_GLOBAL("relax.transform.Trace")
 TVM_REGISTER_GLOBAL("relax.transform.TraceVerify").set_body_method<Trace>(&TraceNode::Verify);
 TVM_REGISTER_GLOBAL("relax.transform.TraceAdd").set_body_method<Trace>(&TraceNode::Add);
 TVM_REGISTER_GLOBAL("relax.transform.TraceSetPerf").set_body_method<Trace>(&TraceNode::SetPerf);
+TVM_REGISTER_GLOBAL("relax.transform.TraceSetOutMod").set_body_method<Trace>(&TraceNode::SetOutMod);
+
+TVM_REGISTER_GLOBAL("relax.transform.TraceAsJSON").set_body_method<Trace>(&TraceNode::AsJSON);
+TVM_REGISTER_GLOBAL("relax.transform.TraceFromJSON").set_body_typed([](ObjectRef json) {
+  return LoadTraceFromJSON(json);
+});
+
 }  // namespace relax
 }  // namespace tvm

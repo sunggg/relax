@@ -44,57 +44,93 @@ from tvm.meta_schedule.runner import (
     LocalRunner,
     RunnerInput,
 )
+from tvm.tir.schedule.trace import JSON_TYPE, _json_from_tvm
+from tvm.runtime._ffi_node_api import LoadJSON
 from tvm._ffi import register_object
 from tvm._ffi.registry import register_func
+
 from . import _ffi_api
 
 logger = logging.getLogger("TuningAPI")  # pylint: disable=invalid-name
 
-# Default constraint func that always returns true
-def f_default_constr(mod: IRModule):  # pylint: disable=unused-argument
+# Default transform func that returns original IRModule.
+@tvm.register_func("relax.transform.Choice.f_default_transform")
+def f_default_transform(mod):
+    return mod
+
+
+# Default constraint func that always returns true.
+@tvm.register_func("relax.transform.Choice.f_default_constr")
+def f_default_constr(mod: IRModule) -> bool:  # pylint: disable=unused-argument
     return True
 
 
 @register_object("relax.transform.Choice")
 class Choice(Object):
     """
-    A TVM object Choice that maintains a set of transformation and constraint functions.
-    Transformation function should be applied when constraint function returns true.
+    A TVM object Choice that maintains a set of transformation and constraint function keys.
+    Corresponding functions should be registered as PackedFunc with these keys.
+    Transformation function will be applied when constraint function returns true.
     Parameters
     ----------
-    f_transform : Callable
-        Transformation function.
+    f_transform_key : Optional[str]
+        Key for transformation function.
 
-    f_constr : Callable
-        Constraint function.
+    f_constr_key : Optional[str]
+        Key for Constraint function.
 
     Examples
     --------
     The following code block defines a Choice.
 
     .. code-block:: python
-
+        @tvm.register_func("relax.transform.test.f_transform")
         def apply(mod):
             return relax.transform.FoldConstant()(mod)
+        @tvm.register_func("relax.transform.test.f_constr")
         def constr(mod):
             return len(mod.functions) == 3
         # Define a choice to apply constant folding only when IRModule has three functions.
-        choice = Choice(apply, constr)
+        choice = Choice("relax.transform.test.f_transform", "relax.transform.test.f_constr")
     """
 
-    def __init__(self, f_transform: Callable, f_constr: Optional[Callable] = None):
+    def __init__(
+        self,
+        f_transform_key: Optional[str] = None,
+        f_transform_args: Optional[List] = None,
+        f_constr_key: Optional[str] = None,
+        f_constr_args: Optional[List] = None,
+    ):
         """Constructor
         Parameters
         ----------
-        f_transform : Callable
-            Transformation function.
+        f_transform_key : Optional[str]
+            Key for transformation function.
 
-        f_constr : Callable
-            Constraint function.
+        f_tramsform_args: Optional[List]
+
+        f_constr_key : Optional[str]
+            Key for constraint function.
         """
-        f_constr = f_constr if f_constr else f_default_constr
+
+        if f_transform_key is None:
+            f_transform_key = "relax.transform.Choice.f_default_transform"
+
+        if f_transform_args is None:
+            f_transform_args = []
+
+        if f_constr_key is None:
+            f_constr_key = "relax.transform.Choice.f_default_constr"
+
+        if f_constr_args is None:
+            f_constr_args = []
+
         self.__init_handle_by_constructor__(
-            _ffi_api.Choice, f_transform, f_constr  # type: ignore # pylint: disable=no-member
+            _ffi_api.Choice,
+            f_transform_key,
+            f_transform_args,
+            f_constr_key,
+            f_constr_args,  # type: ignore # pylint: disable=no-member
         )
 
     def get_transform_func(self) -> Callable:
@@ -115,14 +151,32 @@ class Choice(Object):
         """
         return _ffi_api.ChoiceGetConstrFunc(self)
 
-    def check_constr(self, mod: IRModule) -> bool:
-        """Perform f_constr
+    def apply_transform_func(self, mod: IRModule) -> IRModule:
+        """Perform f_transform with its args
         Returns
         -------
-        ret: Bool
+        ret: Callable
+           registered transformation function
+        """
+        return _ffi_api.ChoiceApplyTransformFunc(self, mod)
+
+    def check_constr(self, mod: IRModule) -> bool:
+        """Perform f_constr with its args
+        Returns
+        -------
+        ret: bool
            Returns whether the IRModule satisfies the constraint or not
         """
         return _ffi_api.ChoiceCheckConstr(self, mod)
+
+    def as_json(self) -> JSON_TYPE:
+        """Serialize the trace as a JSON-style object
+        Returns
+        -------
+        json: JSON_TYPE
+            The JSON-style object
+        """
+        return _ffi_api.ChoiceAsJSON(self)  # type: ignore # pylint: disable=no-member
 
 
 @register_object("relax.transform.Knob")
@@ -143,12 +197,10 @@ class Knob(Object):
     The following code block defines a Knob.
 
     .. code-block:: python
-
+        @tvm.register_func("relax.transform.test.f_transform")
         def apply(mod):
             return relax.transform.FoldConstant()(mod)
-        def noapply(mod):
-            return mod
-        choices = {"apply": Choice(apply), "noapply": Choice(noapply)}
+        choices = {"apply": Choice("relax.transform.test.f_transform"), "noapply": Choice()}
         # A knob manages a set of its valid choices
         knob = Knob("MockTuningKnob", choices)
     """
@@ -173,6 +225,15 @@ class Knob(Object):
         if isinstance(decision, int):
             decision = str(decision)
         return _ffi_api.KnobApply(self, mod, decision)
+
+    def as_json(self) -> JSON_TYPE:
+        """Serialize the trace as a JSON-style object
+        Returns
+        -------
+        json: JSON_TYPE
+            The JSON-style object
+        """
+        return _ffi_api.KnobAsJSON(self)
 
     def __str__(self) -> str:
         msg = f"{self.name} (# of choices: {len(self.choices)})\n"
@@ -237,12 +298,77 @@ class Trace(Object):
         """Set performance number for the trace."""
         return _ffi_api.TraceSetPerf(self, perf)
 
+    def set_out_mod(self, mod: IRModule) -> None:
+        """Set out_mod for the trace."""
+        return _ffi_api.TraceSetOutMod(self, mod)
+
+    def as_json(self) -> JSON_TYPE:
+        """Serialize the trace as a JSON-style object
+        Returns
+        -------
+        json: JSON_TYPE
+            The JSON-style object
+        """
+        obj = _ffi_api.TraceAsJSON(self)
+        return _json_from_tvm(obj)
+
     def __str__(self) -> str:
         n = len(self.knobs)
         msg = f"Trace length: {n}\n"
         for idx in range(n):
             msg += f"[{idx+1}] {self.knobs[idx].name}: {self.decisions[idx]}\n"
         return msg
+
+
+def load_choice_from_json(json_obj: JSON_TYPE) -> Choice:
+    """
+    Helper function to load Choice from JSON obj
+
+    Parameters
+    ----------
+    json_obj: JSON_TYPE
+        Choice serialized with JSON
+
+    Return
+    ----------
+    choice: Choice
+        Deserialized choice
+    """
+    return _ffi_api.ChoiceFromJSON(json_obj)
+
+
+def load_knob_from_json(json_obj: JSON_TYPE) -> Knob:
+    """
+    Helper function to load Knob from JSON obj
+
+    Parameters
+    ----------
+    json_obj: JSON_TYPE
+        Knob serialized with JSON
+
+    Return
+    ----------
+    knob: Knob
+        Deserialized knob
+    """
+    return _ffi_api.KnobFromJSON(json_obj)
+
+
+def load_trace_from_json(json_obj: JSON_TYPE) -> Trace:
+    """
+    Helper function to load Trace from JSON obj
+
+    Parameters
+    ----------
+    json_obj: JSON_TYPE
+        Trace serialized with JSON
+
+    Return
+    ----------
+    trace: Trace
+        Deserialized trace
+    """
+    return _ffi_api.TraceFromJSON(json_obj)
 
 
 @register_func("relax.transform.default_generate_candidate")
