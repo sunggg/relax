@@ -18,13 +18,14 @@
  */
 
 /*!
- * \file tvm/relax/tuning.h
+ * \file tvm/relax/tuning_api.h
  * \brief Relax Tuning Pass APIs.
  */
 #ifndef TVM_RELAX_TUNING_H_
 #define TVM_RELAX_TUNING_H_
 #include <tvm/ir/module.h>
 #include <tvm/ir/transform.h>
+#include <tvm/meta_schedule/database.h>
 namespace tvm {
 namespace relax {
 
@@ -105,7 +106,7 @@ class ChoiceNode : public runtime::Object {
    */
   ObjectRef AsJSON() const;
 
-  static constexpr const char* _type_key = "relax.transform.Choice";
+  static constexpr const char* _type_key = "relax.tuning_api.Choice";
   TVM_DECLARE_BASE_OBJECT_INFO(ChoiceNode, Object);
 };
 
@@ -114,11 +115,12 @@ class Choice : public runtime::ObjectRef {
  public:
   TVM_DLL explicit Choice(String f_transform_key, Array<ObjectRef> f_transform_args,
                           String f_constr_key, Array<ObjectRef> f_constr_args);
+  TVM_DLL static Choice FromJSON(const ObjectRef& json_obj);
   TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(Choice, ObjectRef, ChoiceNode);
 };
 
 /*! \brief Deserialize JSON-style object into Choice */
-Choice LoadChoiceFromJSON(ObjectRef json);
+// Choice LoadChoiceFromJSON(ObjectRef json);
 
 /*! \brief Knob manages a set of valid choices for an optimization. */
 class KnobNode : public runtime::Object {
@@ -153,7 +155,7 @@ class KnobNode : public runtime::Object {
    */
   ObjectRef AsJSON() const;
 
-  static constexpr const char* _type_key = "relax.transform.Knob";
+  static constexpr const char* _type_key = "relax.tuning_api.Knob";
   TVM_DECLARE_BASE_OBJECT_INFO(KnobNode, Object);
 };
 
@@ -161,11 +163,12 @@ class KnobNode : public runtime::Object {
 class Knob : public runtime::ObjectRef {
  public:
   TVM_DLL explicit Knob(String name, Map<String, Choice> choices);
+  TVM_DLL static Knob FromJSON(const ObjectRef& json_obj);
   TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(Knob, ObjectRef, KnobNode);
 };
 
 /*! \brief Deserialize JSON-style object into Knob */
-Knob LoadKnobFromJSON(ObjectRef json);
+// Knob LoadKnobFromJSON(ObjectRef json);
 
 /*! \brief Trace manages history of optimization decisions. */
 class TraceNode : public runtime::Object {
@@ -229,19 +232,79 @@ class TraceNode : public runtime::Object {
 
   void SetOutMod(IRModule mod_) { out_mod = mod_; }
 
-  static constexpr const char* _type_key = "relax.transform.Trace";
+  static constexpr const char* _type_key = "relax.tuning_api.Trace";
   TVM_DECLARE_BASE_OBJECT_INFO(TraceNode, Object);
 };
 
 /*! \brief Managed reference to TraceNode */
 class Trace : public runtime::ObjectRef {
  public:
+  /*! \brief Default constructor. Creating an empty trace. */
+  Trace();
+  /*!
+   * \brief Constructor. Creating a trace from existing knobs and their decisions
+   * \param in_mod Input IRModule
+   * \param knobs The knobs used
+   * \param decisions The decisions made in sampling
+   */
+
+  TVM_DLL static Trace FromJSON(const ObjectRef& json_obj);
   TVM_DLL explicit Trace(IRModule in_mod, Array<Knob> knobs, Array<String> decisions);
   TVM_DEFINE_MUTABLE_NOTNULLABLE_OBJECT_REF_METHODS(Trace, ObjectRef, TraceNode);
 };
 
 /*! \brief Deserialize JSON-style object into Trace */
-Trace LoadTraceFromJSON(ObjectRef json);
+// Trace LoadTraceFromJSON(ObjectRef json);
+
+/*! \brief The class of tuning records. */
+class TuningRecordNode : public meta_schedule::BaseTuningRecordNode {
+ public:
+  /*! \brief The trace tuned */
+  Trace trace;
+  void VisitAttrs(tvm::AttrVisitor* v) { v->Visit("trace", &trace); }
+
+  static constexpr const char* _type_key = "relax.tuning_api.TuningRecord";
+  TVM_DECLARE_FINAL_OBJECT_INFO(TuningRecordNode, meta_schedule::BaseTuningRecordNode);
+
+  /*!
+   * \brief Export the tuning record to a JSON string.
+   * \return An array containing the trace, running secs, serialized target, and
+   * argument information.
+   */
+  ObjectRef AsJSON() const;
+};
+
+/*!
+ * \brief The managed reference of TuningRecordNode.
+ * \sa TuningRecordNode
+ */
+class TuningRecord : public runtime::ObjectRef {
+ public:
+  /*!
+   \brief Constructor of a tuning record.
+   \param trace The trace of the tuning record.
+   \param run_secs The running time of the tuning record.
+   \param workload The workload of the tuning record.
+   \param target The target of the tuning record.
+   \param args_info The argument information of the tuning record.
+  */
+  TVM_DLL explicit TuningRecord(Trace trace, Array<FloatImm> run_secs,
+                                meta_schedule::Workload workload, tvm::Target target,
+                                Array<meta_schedule::ArgInfo> args_info);
+  /*!
+   * \brief Create a tuning record from a json object.
+   * \param json_obj The json object.
+   * \return The tuning record created.
+   */
+  TVM_DLL static TuningRecord FromJSON(const ObjectRef& json_obj);
+  TVM_DEFINE_NOTNULLABLE_OBJECT_REF_METHODS(TuningRecord, runtime::ObjectRef, TuningRecordNode);
+};
+
+/*! \brief The default database implementation, which mimics two database tables with two files. */
+class JSONDatabaseNode : public meta_schedule::DatabaseNode {
+ public:
+  int i;
+};
 
 }  // namespace relax
 }  // namespace tvm

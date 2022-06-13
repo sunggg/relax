@@ -24,7 +24,7 @@
 #include <dmlc/thread_local.h>
 #include <tvm/ir/transform.h>
 #include <tvm/node/repr_printer.h>
-#include <tvm/relax/tuning.h>
+#include <tvm/relax/tuning_api.h>
 #include <tvm/runtime/device_api.h>
 #include <tvm/runtime/registry.h>
 
@@ -451,8 +451,8 @@ IRModule SequentialNode::operator()(IRModule mod, const PassContext& pass_ctx) c
       // In other words, pass applies outside of Tuning Pass API and we just save its name and
       // result. This can be fixed when two issues above are resolved.
 
-      String f_transform_key = "relax.transform.Choice.f_default_transform";
-      String f_constr_key = "relax.transform.Choice.f_default_constr";
+      String f_transform_key = "relax.tuning_api.Choice.f_default_transform";
+      String f_constr_key = "relax.tuning_api.Choice.f_default_constr";
 
       relax::Knob knob = relax::Knob(
           pass_info->name, {{"enabled", relax::Choice(f_transform_key, Array<ObjectRef>(),

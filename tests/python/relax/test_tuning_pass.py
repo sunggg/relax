@@ -29,20 +29,19 @@ from tvm.ir.transform import PassContext
 from tvm.ir.module import IRModule
 from tvm.tir import PrimFunc
 from tvm.script import tir as T, relax as R
-from tvm.relax.transform.tuning import Choice, Knob, Trace
 from tvm import relax
 from tvm.relax.expr import Expr, DataflowBlock, Function
 import tvm.meta_schedule as ms
 from tvm.meta_schedule.testing import DummyDatabase
-from tvm.relax.transform.tuning import (
+from tvm.relax.transform.tuning_api import (
+    Choice,
+    Knob,
+    Trace,
     default_generate_candidate,
     default_consider_eval_passes,
     default_evaluate,
     select_best_candidate,
     get_trace,
-    load_choice_from_json,
-    load_knob_from_json,
-    load_trace_from_json,
 )
 
 
@@ -50,6 +49,7 @@ from tvm.relax.transform.tuning import (
 class MyModule:
     @T.prim_func
     def addone(A: T.Buffer[(16, 16), "int32"], B: T.Buffer[(16, 16), "int32"]) -> None:
+        T.func_attr(({"global_symbol": "addone"}))
         for i, j in T.grid(16, 16):
             with T.block("addone"):
                 vi, vj = T.axis.remap("SS", [i, j])
@@ -67,6 +67,7 @@ def setup_test_const_folding():
     class TestModule:
         @T.prim_func
         def addone(A: T.Buffer[(16, 16), "int32"], B: T.Buffer[(16, 16), "int32"]) -> None:
+            T.func_attr(({"global_symbol": "addone"}))
             for i, j in T.grid(16, 16):
                 with T.block("addone"):
                     vi, vj = T.axis.remap("SS", [i, j])
@@ -160,8 +161,8 @@ def test_choice():
     # Without any argument, default setting will be used for both transformation and constraint functions.
     # default transformation function will return the original IRModule without any change.
     choice = Choice(
-        # - f_transform_key="relax.transform.Choice.f_default_transform"
-        # - f_constr_key="relax.transform.Choice.f_default_constr")
+        # - f_transform_key="relax.tuning_api.Choice.f_default_transform"
+        # - f_constr_key="relax.tuning_api.Choice.f_default_constr")
     )
     # Load transformation function from the choice and apply it.
     after = choice.apply_transform_func(before)
@@ -175,11 +176,10 @@ def test_choice():
     # Create a choice that tags global symbol onto target function.
     choice = Choice("testing.add_global_symbol", ["addone", "test-symbol"])
     after = choice.apply_transform_func(before)
-    assert after["addone"].attrs is not None
     assert after["addone"].attrs["global_symbol"] == "test-symbol"
     # The transformation should be applied with Copy-On-Write.
     # So, the original module should be unchanged.
-    assert before["addone"].attrs is None
+    assert before["addone"].attrs["global_symbol"] == "addone"
 
     # Test choice with impossible constraint
     choice = Choice(
@@ -190,7 +190,7 @@ def test_choice():
     )
     # Since the constraint is not met, it should return the original function
     after = choice.apply_transform_func(before)
-    assert after["addone"].attrs is None
+    assert after["addone"].attrs["global_symbol"] == "addone"
 
     # Test choice with the proper constraint
     choice = Choice(
@@ -201,22 +201,20 @@ def test_choice():
     )
     # Since the constraint is not met, it should return the original function
     after = choice.apply_transform_func(before)
-    assert after["addone"].attrs is not None
     assert after["addone"].attrs["global_symbol"] == "test-symbol"
     # The original module should be unchanged.
-    assert before["addone"].attrs is None
+    assert before["addone"].attrs["global_symbol"] == "addone"
 
     # Test roundtrip.
     # Export as JSON.
     json_obj = choice.as_json()
     # Import JSON.
-    new_choice = load_choice_from_json(json_obj)
+    new_choice = Choice.from_json(json_obj)
     # Test imported choice
     after = new_choice.apply_transform_func(before)
-    assert after["addone"].attrs is not None
     assert after["addone"].attrs["global_symbol"] == "test-symbol"
     # The original module should be unchanged.
-    assert before["addone"].attrs is None
+    assert before["addone"].attrs["global_symbol"] == "addone"
 
 
 def test_knob():
@@ -272,7 +270,7 @@ def test_knob():
     # Export as JSON.
     json_obj = knob.as_json()
     # Import JSON.
-    new_knob = load_knob_from_json(json_obj)
+    new_knob = Knob.from_json(json_obj)
     assert new_knob.name == knob.name
     # Test imported knob
     assert new_knob.verify("apply")
@@ -339,7 +337,7 @@ def test_trace():
     # Export as JSON.
     json_obj = trace.as_json()
     # Import JSON.
-    new_trace = load_trace_from_json(json_obj)
+    new_trace = Trace.from_json(json_obj)
     tvm.ir.assert_structural_equal(trace.in_mod, new_trace.in_mod)
     assert new_trace.size == 3
     tvm.ir.assert_structural_equal(trace.out_mod, new_trace.out_mod)
@@ -454,6 +452,7 @@ def test_default_functions():
         assert PassContext.current().num_evals == 0
 
 
+# TODO(sunggg): Do we need to serialize pass context as well?
 def test_pass_context():
     mod = MyModule
     assert isinstance(mod, tvm.IRModule)
@@ -874,4 +873,8 @@ def test_metaschedule_tuning():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    test_choice()
+    test_knob()
+    test_trace()
+    test_default_functions()
+    # pytest.main([__file__])

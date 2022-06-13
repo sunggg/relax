@@ -73,7 +73,6 @@ Workload Workload::FromJSON(const ObjectRef& json_obj) {
 }
 
 /******** TuningRecord ********/
-
 TuningRecord::TuningRecord(tir::Trace trace, Array<FloatImm> run_secs, Workload workload,
                            Target target, Array<ArgInfo> args_info) {
   ObjectPtr<TuningRecordNode> n = make_object<TuningRecordNode>();
@@ -151,6 +150,7 @@ Database Database::PyDatabase(PyDatabaseNode::FHasWorkload f_has_workload,
 /******** FFI ********/
 
 TVM_REGISTER_NODE_TYPE(WorkloadNode);
+TVM_REGISTER_OBJECT_TYPE(BaseTuningRecordNode);
 TVM_REGISTER_NODE_TYPE(TuningRecordNode);
 TVM_REGISTER_OBJECT_TYPE(DatabaseNode);
 TVM_REGISTER_NODE_TYPE(PyDatabaseNode);
@@ -160,6 +160,7 @@ TVM_REGISTER_GLOBAL("meta_schedule.Workload").set_body_typed([](IRModule mod) {
 TVM_REGISTER_GLOBAL("meta_schedule.WorkloadAsJSON")
     .set_body_method<Workload>(&WorkloadNode::AsJSON);
 TVM_REGISTER_GLOBAL("meta_schedule.WorkloadFromJSON").set_body_typed(&Workload::FromJSON);
+
 TVM_REGISTER_GLOBAL("meta_schedule.TuningRecord")
     .set_body_typed([](tir::Trace trace, Array<FloatImm> run_secs, Workload workload, Target target,
                        Array<ArgInfo> args_info) {
@@ -180,68 +181,4 @@ TVM_REGISTER_GLOBAL("meta_schedule.DatabaseSize").set_body_method<Database>(&Dat
 TVM_REGISTER_GLOBAL("meta_schedule.DatabasePyDatabase").set_body_typed(Database::PyDatabase);
 
 }  // namespace meta_schedule
-
-namespace relax {
-/******** TuningRecord ********/
-
-TuningRecord::TuningRecord(Trace trace, Array<FloatImm> run_secs, meta_schedule::Workload workload,
-                           Target target, Array<meta_schedule::ArgInfo> args_info) {
-  // ObjectPtr<TuningRecordNode> n = make_object<TuningRecordNode>();
-  // n->trace = trace;
-  // n->run_secs = run_secs;
-  // n->workload = workload;
-  // n->target = target;
-  // n->args_info = args_info;
-  // this->data_ = n;
-}
-
-/*
-ObjectRef TuningRecordNode::AsJSON() const {
-  Array<ObjectRef> json_args_info;
-  json_args_info.reserve(args_info.size());
-  for (const meta_schedule::ArgInfo& arg_info : args_info) {
-    json_args_info.push_back(arg_info->AsJSON());
-  }
-  return Array<ObjectRef>{trace->AsJSON(false),  //
-                          run_secs,              //
-                          target->Export(),      //
-                          json_args_info};
-}
-
-TuningRecord TuningRecord::FromJSON(const ObjectRef& json_obj,
-                                    const meta_schedule::Workload& workload) {
-  Trace trace{nullptr};
-  Array<FloatImm> run_secs{nullptr};
-  Target target{nullptr};
-  Array<meta_schedule::ArgInfo> args_info;
-  try {
-    const ArrayNode* json_array = json_obj.as<ArrayNode>();
-    CHECK(json_array && json_array->size() == 4);
-    // Load json[1] => run_secs
-    run_secs = Downcast<Array<FloatImm>>(json_array->at(1));
-    // Load json[2] => target
-    target = Target(Downcast<Map<String, ObjectRef>>(json_array->at(2)));
-    // Load json[3] => args_info
-    {
-      const ArrayNode* json_args_info = json_array->at(3).as<ArrayNode>();
-      args_info.reserve(json_args_info->size());
-      for (const ObjectRef& json_arg_info : *json_args_info) {
-        args_info.push_back(meta_schedule::ArgInfo::FromJSON(json_arg_info));
-      }
-    }
-    // Load json[0] => trace
-    {
-      // const ObjectRef& json_trace = json_array->at(0);
-      // handle trace
-    }
-  } catch (const std::runtime_error& e) {  // includes tvm::Error and dmlc::Error
-    LOG(FATAL) << "ValueError: Unable to parse the JSON object: " << json_obj
-               << "\nThe error is: " << e.what();
-  }
-  return TuningRecord(trace, run_secs, workload, target, args_info);
-}
-*/
-
-}  // namespace relax
-
 }  // namespace tvm

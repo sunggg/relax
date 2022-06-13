@@ -66,7 +66,7 @@ class JSONDatabaseNode : public DatabaseNode {
   }
 
   static constexpr const char* _type_key = "meta_schedule.JSONDatabase";
-  TVM_DECLARE_FINAL_OBJECT_INFO(JSONDatabaseNode, DatabaseNode);
+  TVM_DECLARE_BASE_OBJECT_INFO(JSONDatabaseNode, DatabaseNode);
 
  public:
   bool HasWorkload(const IRModule& mod) {
