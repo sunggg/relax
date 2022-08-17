@@ -19,10 +19,12 @@ import tvm
 import tvm.testing
 import tvm.topi.testing
 from tvm import autotvm, relay, te
+import tvm.meta_schedule as ms
 from tvm.meta_schedule import ApplyHistoryBest
 from tvm.meta_schedule.testing.utils import apply_fixed_schedules
 from tvm.relay.testing.temp_op_attr import TempOpAttr
 from tvm.script import tir as T
+from tvm.tir.schedule import Schedule, Trace
 
 
 def compute_tir_conv2d_nchw_oihw(data_shape, weight_shape, dtype):
@@ -178,5 +180,51 @@ def test_conv2d():
     tvm.testing.assert_allclose(out, ref, atol=1e-4, rtol=1e-4)
 
 
+def test_conv2d_apply_manual_schedule():
+    N, IC, H, W = 1, 64, 56, 56
+    OC, IC, FH, FW = 128, 64, 3, 3
+    data_shape = (N, IC, H, W)
+    weight_shape = (OC, IC, FH, FW)
+    padding = (0, 0)
+    strides = (1, 1)
+
+    data_np = np.random.randn(*data_shape).astype("float32")
+    weight_np = np.random.randn(*weight_shape).astype("float32")
+    target = tvm.target.Target("llvm")
+    params = {"weight": weight_np}
+
+    relay_mod = tvm.IRModule.from_expr(
+        get_conv2d(
+            data_shape,
+            weight_shape,
+            padding=padding,
+            strides=strides,
+            channels=OC,
+            kernel_size=(FH, FW),
+            data_layout="NCHW",
+            kernel_layout="OIHW",
+        )
+    )
+    with TempOpAttr("nn.conv2d", "FTVMStrategy", _tmp_strategy):
+        extracted_tasks = ms.extract_task_from_relay(
+            relay_mod,
+            target,
+            params,
+            te_filter_func="meta_schedule.DefaultTaskFilterAllowExtern",
+        )
+        for task in extracted_tasks:
+            if "nn_conv2d" in task.task_name:
+                mod = ms.default_config.mod(task.dispatched[0])
+                sch = Schedule(mod)
+                schedule_tir_conv2d_nchw_oihw(sch)
+
+                Trace(insts=[], decisions={}).apply_to_schedule(sch, remove_postproc=False)
+                out_mod = sch.mod
+
+                # Schedule is applied
+                assert not tvm.ir.structural_equal(mod, out_mod)
+
+
 if __name__ == "__main__":
-    test_conv2d()
+    # test_conv2d()
+    test_conv2d_apply_manual_schedule()
