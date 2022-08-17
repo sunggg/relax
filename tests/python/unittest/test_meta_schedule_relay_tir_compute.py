@@ -206,6 +206,7 @@ def test_conv2d_apply_manual_schedule():
         )
     )
     with TempOpAttr("nn.conv2d", "FTVMStrategy", _tmp_strategy):
+        # We need extraction for lowering
         extracted_tasks = ms.extract_task_from_relay(
             relay_mod,
             target,
