@@ -255,6 +255,7 @@ def get_workload(outs, task_name=None):
         """traverse all ops to find attached workload"""
         for t in tensors:
             op = t.op
+            print(op)
             wkl = traverse(op.input_tensors)
             if wkl is not None:
                 return wkl
@@ -266,4 +267,5 @@ def get_workload(outs, task_name=None):
         return None
 
     outs = [outs] if isinstance(outs, tensor.Tensor) else outs
+    print(outs, type(outs[0]))
     return traverse(outs)

@@ -268,5 +268,35 @@ def test_translate_op_with_tir():
     assert_structural_equal(relax_mod["multiply"], tir_matmul)
 
 
+def test_topi_schedule():
+    target_str = "llvm"
+    target = Target(target_str)
+    size = 64
+    data = relay.var("data", shape=(size, size))
+    weights = relay.var("weights", shape=(size, size))
+    y = relay.nn.matmul(data, weights)
+    relay_mod = tvm.IRModule.from_expr(relay.Function([data, weights], y))
+    print(relay_mod)
+    with tvm.transform.PassContext(opt_level=3):
+        lib = relay.build(relay_mod, target)
+
+    print("\n\n translator")
+    relax_mod = relay_translator.from_relay(relay_mod["main"], target=target)
+    """
+    batch_size = 1
+    
+    layout = "NCHW"
+    image_shape = (4, 32, 32)
+    
+    dev = tvm.device(str(target), dev_id=0)
+    relay_mod, params = get_resnet(batch_size, "float32", layout, image_shape)
+    input_shape = (1, *image_shape)
+    data = tvm.nd.array(np.random.rand(*input_shape).astype(np.float32), dev)
+    print(relay_mod)
+    relax_mod = relay_translator.from_relay(relay_mod["main"], target=target, relay_params=params)
+    """
+
+
 if __name__ == "__main__":
-    pytest.main([__file__])
+    test_topi_schedule()
+    # pytest.main([__file__])

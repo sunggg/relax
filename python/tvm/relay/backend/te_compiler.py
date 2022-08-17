@@ -203,10 +203,15 @@ def select_implementation(op, attrs, inputs, out_type, target, use_autotvm=True)
     dispatch_ctx = autotvm.task.DispatchContext.current
     old_silent = autotvm.GLOBAL_SCOPE.silent
     autotvm.GLOBAL_SCOPE.silent = True
+
+    print(dispatch_ctx)
     for impl in all_impls:
+        print(impl)
         outs = impl.compute(attrs, inputs, out_type)
         outputs[impl] = outs
+        print("get_workload")
         workload = autotvm.task.get_workload(outs)
+        print("done")
         workloads[impl] = workload
         if workload is None:
             # Not an AutoTVM tunable implementation

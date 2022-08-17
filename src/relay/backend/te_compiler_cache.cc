@@ -803,6 +803,10 @@ std::pair<Array<te::Tensor>, std::string> LowerTECompute(const Function& source_
   return std::make_pair(tensor_outs, lower_te_compute.candidate_name_);
 }
 
+TVM_REGISTER_GLOBAL("relay.backend.GetShape").set_body_typed([](Array<IndexExpr> shape) {
+  return GetShape(shape);
+});
+
 TVM_REGISTER_GLOBAL("relay.backend.LowerToTE").set_body_typed([](Function prim_func) {
   auto tgt = tvm::Target("ext_dev");
   LowerToTECompute lower_te_compute(tgt);

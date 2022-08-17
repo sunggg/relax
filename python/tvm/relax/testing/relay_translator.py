@@ -21,12 +21,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 import tvm
 from tvm.ir.module import IRModule
-from tvm import relax, relay
+from tvm import relax, relay, autotvm, te
 from tvm.relax.testing import nn
-from tvm.relay.backend.te_compiler import select_implementation
+from tvm.relay.backend.te_compiler import select_implementation, get_shape
 from tvm.runtime import NDArray
 from tvm.target import Target
 from tvm.meta_schedule.utils import autotvm_silencer
+from .. import ty as _ty
 
 
 def from_relay(
@@ -82,7 +83,7 @@ def from_relay(
     if pass_config is None:
         pass_config = {
             "relay.FuseOps.max_depth": 1,  # Disable relay fusion
-            "relay.backend.use_meta_schedule": True,
+            "relay.backend.use_meta_schedule": False,
         }
 
     if relay_params:
@@ -118,10 +119,23 @@ def from_relay(
             args = node.args
             new_args = []
             te_inputs = []
+
             for arg in args:
                 if arg in var_map:
+                    print(
+                        te.placeholder(
+                            arg.checked_type.shape, name="noname", dtype=arg.checked_type.dtype
+                        )
+                    )
                     new_args.append(var_map[arg])
-                    te_inputs.append(tvm.relax.expr.te_tensor(new_args[-1]))
+                    # te_inputs.append(tvm.relax.expr.te_tensor(new_args[-1]))
+                    te_inputs.append(
+                        te.placeholder(
+                            arg.checked_type.shape, name="noname", dtype=arg.checked_type.dtype
+                        )
+                    )
+
+            print(te_inputs)
 
             op_name = node.op.name
             attrs = node.attrs
@@ -132,14 +146,25 @@ def from_relay(
                 call = relax.call_tir(tir_gvar, new_args, out_type.shape, out_type.dtype)
                 var = bb.emit(call)
             else:
-                best_impl, outputs = select_implementation(
-                    node.op,
-                    attrs,
-                    te_inputs,
-                    out_type,
-                    target,
-                    use_autotvm=False,
-                )
+                if isinstance(autotvm.DispatchContext.current, autotvm.FallbackContext):
+                    raw_targets = Target.canon_multi_target_and_host(
+                        Target.target_or_current(target), target_host=None
+                    )
+                    assert len(raw_targets) > 0
+                    tophub_context = autotvm.tophub.context(list(raw_targets))
+                else:
+                    tophub_context = autotvm.utils.EmptyContext()
+
+                with tophub_context:
+                    best_impl, outputs = select_implementation(
+                        node.op,
+                        attrs,
+                        te_inputs,
+                        out_type,
+                        target,
+                        use_autotvm=True,
+                    )
+
                 compute_func = best_impl.compute
                 name_hint = op_name.split(".")[-1]
                 var = bb.emit_te(
@@ -185,14 +210,33 @@ def from_relay(
 
     # List of subset of relay->relay optimizations
     # See src/relay/backend/utils.cc::GetPassPrefix() for full list
-    seq = tvm.get_global_func("relay.backend.GetPassPrefixSeq")(True, True)
+    prefix_seq = tvm.get_global_func("relay.backend.GetPassPrefixSeq")(True, True)
+
+    f_get_shape = tvm.get_global_func("relay.backend.GetShape")
+    assert f_get_shape
+
+    # seq.push_back()
 
     # Since optimization passes and OpStrategy are highly context-dependent,
     # we match the exact same context with `extract_task_from_relay()` env
-    with autotvm_silencer(), target, tvm.transform.PassContext(
+    # with autotvm_silencer(), target, tvm.transform.PassContext(
+    with target, tvm.transform.PassContext(
         opt_level=opt_level, config=pass_config, disabled_pass=disabled_pass
     ):
         mod = tvm.IRModule.from_expr(func)
+        mod = prefix_seq(mod)
+
+        seq = tvm.transform.Sequential(
+            [
+                relay.transform.InferType(),
+                relay.transform.Inline(),
+                relay.transform.InferType(),
+                # Skip two passes for now since they only provide c++ interface
+                # relay.transform.LabelOps(),
+                # relay.AnnotateMemoryScope()
+            ]
+        )
+
         mod = seq(mod)
         bb = relax.BlockBuilder()
         with bb.function("main"):

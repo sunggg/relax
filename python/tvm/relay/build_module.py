@@ -398,6 +398,7 @@ def build(
     # pylint: enable=line-too-long
     # fmt: on
 
+    print("BUILD========")
     if not isinstance(ir_mod, (IRModule, _function.Function)):
         raise ValueError("Type of input parameter mod must be tvm.IRModule")
 
@@ -432,6 +433,8 @@ def build(
         tophub_context = autotvm.tophub.context(list(raw_targets))
     else:
         tophub_context = autotvm.utils.EmptyContext()
+
+    print(tophub_context)
 
     with tophub_context:
         bld_mod = BuildModule()
