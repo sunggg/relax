@@ -51,6 +51,13 @@ class FunctionPassNode : public tvm::transform::PassNode {
   /* \brief The pass meta data.*/
   PassInfo pass_info;
 
+  /*! \brief Optional target attribute.
+   * If provided, performs the pass only for functions with given attribute.
+   * Otherwise, apply the pass for every function (default).
+   */
+  // TODO(@sunggg): currently, only support string attribute.
+  Optional<Map<String, String>> target_attrs;
+
   /*! \brief The packed pass function sketches the real optimization. For
    * instance, we can implement a pass that works on a Relax function as a
    * `pass_func` and let it run on a given IRModule. The same `pass_func` will
@@ -100,17 +107,18 @@ class FunctionPass : public Pass {
    */
   TVM_DLL FunctionPass(
       runtime::TypedPackedFunc<Function(Function, IRModule, PassContext)> pass_func,
-      PassInfo pass_info);
+      PassInfo pass_info, Optional<Map<String, String>> target_attrs = NullOpt);
 
   TVM_DEFINE_OBJECT_REF_METHODS(FunctionPass, Pass, FunctionPassNode);
 };
 
 FunctionPass::FunctionPass(
     runtime::TypedPackedFunc<Function(Function, IRModule, PassContext)> pass_func,
-    PassInfo pass_info) {
+    PassInfo pass_info, Optional<Map<String, String>> target_attrs) {
   auto n = make_object<FunctionPassNode>();
   n->pass_func = std::move(pass_func);
   n->pass_info = std::move(pass_info);
+  n->target_attrs = std::move(target_attrs);
   data_ = std::move(n);
 }
 
@@ -139,7 +147,7 @@ IRModule FunctionPassNode::operator()(IRModule mod, const PassContext& pass_ctx)
 
   IRModule updated_mod = mod->ShallowCopy();
 
-  std::vector<std::pair<GlobalVar, Function> > updates;
+  std::vector<std::pair<GlobalVar, Function>> updates;
   for (const auto& it : updated_mod->functions) {
     // only picks up relax::Function
     if (auto* n = it.second.as<FunctionNode>()) {
@@ -166,15 +174,36 @@ IRModule FunctionPassNode::operator()(IRModule mod, const PassContext& pass_ctx)
 
 bool FunctionPassNode::SkipFunction(const Function& func) const {
   // TODO(@yuchen): will need to revisit in the future
-  return (func->GetAttr<String>(relay::attr::kCompiler).defined()) ||
-         func->GetAttr<Integer>(relay::attr::kSkipOptimization, 0) != 0;
+  bool legacy_check = (func->GetAttr<String>(relay::attr::kCompiler).defined()) ||
+                      func->GetAttr<Integer>(relay::attr::kSkipOptimization, 0) != 0;
+  if (legacy_check) return true;
+
+  // If target_attrs are provided, we should apply pass only for target functions.
+  if (target_attrs.defined()) {
+    // check if the function has one of the target attribute pairs.
+    for (auto kv : target_attrs.value()) {
+      String target_attr = kv.first;
+      String target_val = kv.second;
+      if (func->GetAttr<String>(target_attr).defined()) {
+        // target attribute exists, should not skip this function
+        if (target_val == func->GetAttr<String>(target_attr).value()) return false;
+      }
+    }
+    // this function does not have target attr, so skip this function.
+    return true;
+  }
+
+  // If legacy condtion doesn't hold and target_attrs isn't provided (default),
+  // we should perform every function. Therefore, do not skip this function.
+  return false;
 }
 
 Pass CreateFunctionPass(
     const runtime::TypedPackedFunc<Function(Function, IRModule, PassContext)>& pass_func,
-    int opt_level, String name, tvm::Array<String> required, bool traceable) {
+    int opt_level, String name, tvm::Array<String> required,
+    Optional<Map<String, String>> target_attrs, bool traceable) {
   PassInfo pass_info = PassInfo(opt_level, name, required, traceable);
-  return FunctionPass(pass_func, pass_info);
+  return FunctionPass(pass_func, pass_info, target_attrs);
 }
 
 TVM_REGISTER_NODE_TYPE(FunctionPassNode);
@@ -182,7 +211,9 @@ TVM_REGISTER_NODE_TYPE(FunctionPassNode);
 TVM_REGISTER_GLOBAL("relax.transform.MakeFunctionPass")
     .set_body_typed(
         [](runtime::TypedPackedFunc<Function(Function, IRModule, PassContext)> pass_func,
-           PassInfo pass_info) { return FunctionPass(pass_func, pass_info); });
+           PassInfo pass_info, Optional<Map<String, String>> target_attrs) {
+          return FunctionPass(pass_func, pass_info, target_attrs);
+        });
 
 TVM_STATIC_IR_FUNCTOR(ReprPrinter, vtable)
     .set_dispatch<FunctionPassNode>([](const ObjectRef& ref, ReprPrinter* p) {
@@ -354,7 +385,7 @@ IRModule DataflowBlockPassNode::operator()(IRModule mod, const PassContext& pass
   IRModule updated_mod = mod->ShallowCopy();
 
   DataflowBlockMutator dataflow_block_mutator(pass_func, updated_mod, pass_ctx);
-  std::vector<std::pair<GlobalVar, Function> > updates;
+  std::vector<std::pair<GlobalVar, Function>> updates;
   for (const auto& it : updated_mod->functions) {
     // only picks up relax::Function
     if (auto* n = it.second.as<FunctionNode>()) {

@@ -51,7 +51,8 @@ using DataflowBlock = tvm::relax::DataflowBlock;
  */
 TVM_DLL Pass CreateFunctionPass(
     const runtime::TypedPackedFunc<Function(Function, IRModule, PassContext)>& pass_func,
-    int opt_level, String name, tvm::Array<String> required, bool traceable = false);
+    int opt_level, String name, tvm::Array<String> required,
+    Optional<Map<String, String>> target_attrs = NullOpt, bool traceable = false);
 
 /*!
  * \brief Create a dataflowblock pass.

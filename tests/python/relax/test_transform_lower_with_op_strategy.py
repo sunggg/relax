@@ -29,17 +29,6 @@ from tvm.script import relax as R
 from tvm import meta_schedule as ms
 
 
-@tvm.script.ir_module
-class InputModule:
-    @R.function
-    def main(
-        x: Tensor((16, 16), "float32"), w: Tensor((16, 16), "float32")
-    ) -> Tensor((16, 16), "float32"):
-        gv0 = R.multiply(x, w)
-        gv1 = R.add(x, gv0)
-        return gv1
-
-
 def build_and_run(mod, target, dev, np_inputs):
     inputs = [tvm.nd.array(np_input, dev) for np_input in np_inputs]
     with tempfile.TemporaryDirectory() as work_dir:
@@ -60,10 +49,20 @@ def build_and_run(mod, target, dev, np_inputs):
 
 
 def _test_lowering(target, dev):
+    @tvm.script.ir_module
+    class InputModule:
+        @R.function
+        def main(
+            x: Tensor((16, 16), "float32"), w: Tensor((16, 16), "float32")
+        ) -> Tensor((16, 16), "float32"):
+            gv0 = R.multiply(x, w)
+            gv1 = R.add(x, gv0)
+            return gv1
+
     mod = InputModule
     assert mod
     with tvm.transform.PassContext(opt_level=3):
-        out_mod = transform.LowerWithRelayOpStrategyPass(target)(mod)
+        out_mod = transform.LowerWithRelayOpStrategyPass(target, target_attrs={})(mod)
 
     input_shape = (16, 16)
     np_inputs = [
@@ -82,5 +81,42 @@ def test_lowering_gpu(target_str="nvidia/nvidia-t4"):
     _test_lowering(Target(target_str), tvm.cuda())
 
 
+def _test_partial_lowering(target, dev):
+    @tvm.script.ir_module
+    class InputModule:
+        @R.function
+        def should_not_lower(
+            x: Tensor((16, 16), "float32"), w: Tensor((16, 16), "float32")
+        ) -> Tensor((16, 16), "float32"):
+            gv0 = R.multiply(x, w)
+            gv1 = R.add(x, gv0)
+            return gv1
+
+        @R.function
+        def should_lower(
+            x: Tensor((16, 16), "float32"), w: Tensor((16, 16), "float32")
+        ) -> Tensor((16, 16), "float32"):
+            gv0 = R.multiply(x, w)
+            gv1 = R.add(x, gv0)
+            return gv1
+
+    mod = InputModule
+    assert mod
+    # TODO(@sunggg): Revisit when TVMScript supports annotation.
+    # Annotate target function.
+    mod["should_lower"] = mod["should_lower"].with_attr("is_target", "True")
+
+    with tvm.transform.PassContext(opt_level=3):
+        out_mod = transform.LowerWithRelayOpStrategyPass(
+            target, target_attrs={"is_target": "True"}
+        )(mod)
+    print(out_mod)
+
+
+def test_partial_lowering_cpu(target_str="llvm --num-cores=16"):
+    _test_partial_lowering(Target(target_str), tvm.cpu())
+
+
 if __name__ == "__main__":
-    pytest.main([__file__])
+    test_partial_lowering_cpu()
+    # pytest.main([__file__])

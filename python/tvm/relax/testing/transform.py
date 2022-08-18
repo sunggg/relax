@@ -18,19 +18,20 @@
 """Relax transformation passes for testing"""
 
 from __future__ import annotations
+from typing import Dict, Optional
 from tvm import ir
 from tvm import relax
 from tvm.ir.module import IRModule
 from tvm.ir.transform import PassContext
 from tvm.target import Target
-from tvm.ir import transform
 from tvm.relax import ExprMutator
-from tvm.relax.expr import Call
+from tvm.ir import Op
+from tvm.relax.expr import Call, Function
 from tvm.relay.backend.te_compiler import select_implementation
 
 
 @ir.transform.module_pass(opt_level=0)
-class LowerWithRelayOpStrategyPass(transform.Pass):
+class LowerWithRelayOpStrategyPass:
     """Lower Relax Op into TIR by using Relay OpStrategy.
 
     Since operators like conv2d, add, matmul are relay-, relax- independent,
@@ -48,8 +49,9 @@ class LowerWithRelayOpStrategyPass(transform.Pass):
         lowering pass
     """
 
-    def __init__(self, target: Target):
+    def __init__(self, target: Target, target_attrs: Optional[Dict[str, str]] = None):
         self.target = target
+        self.target_attrs = target_attrs
 
     def transform_module(self, mod: IRModule, ctx: PassContext) -> IRModule:
         """Implement lowering mechanism.
@@ -72,12 +74,17 @@ class LowerWithRelayOpStrategyPass(transform.Pass):
         class Lowerer(ExprMutator):
             """Mutator that performs lowering."""
 
+            def __init__(self, target_attrs):
+                super().__init__()
+                self.target_attrs = target_attrs
+                self.is_target_func = True
+
             def visit_call_(self, call_node: Call):
                 # Current relax op name simply adds "relax." prefix to relay op name.
                 # Thus, remove "relax." prefix to deduce relay op name.
                 relay_op_name = call_node.op.name[6:]
                 # Check if equivalent relay op exists. If not, return the original call.
-                if relay_op_name in ir.Op.list_op_names():
+                if self.is_target_func and (relay_op_name in ir.Op.list_op_names()):
                     relay_op = ir.Op.get(relay_op_name)
 
                     te_inputs = [relax.expr.te_tensor(arg) for arg in call_node.args]
@@ -109,8 +116,17 @@ class LowerWithRelayOpStrategyPass(transform.Pass):
             def transform(self):
                 for gv, func in mod.functions.items():
                     if isinstance(func, relax.Function):
+                        if self.target_attrs is None:
+                            self.is_target_func = True
+                        else:
+                            self.is_target_func = False
+                            if func.attrs:
+                                for (key, value) in self.target_attrs.items():
+                                    if key in func.attrs and func.attrs[key] == value:
+                                        self.is_target_func = True
+
                         updated_func = self.visit_expr(func)
                         self.builder_.update_func(gv, updated_func)
                 return self.builder_.get()
 
-        return Lowerer().transform()
+        return Lowerer(self.target_attrs).transform()

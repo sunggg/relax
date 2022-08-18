@@ -138,6 +138,91 @@ def test_function_pass():
     check_equal(After, Expected)
 
 
+def test_function_pass_with_target_attr():
+    @tvm.script.ir_module
+    class Before:
+        @R.function
+        def should_apply(x: Tensor((m, n), "float32"), y: Tensor((m, n), "float32")):
+            with relax.dataflow():
+                lv0 = relax.multiply(x, y)
+                gv0 = relax.add(lv0, y)
+                relax.output(gv0)
+            gv1 = relax.multiply(x, y)
+            gv2 = relax.add(gv1, y)
+            return (gv0, gv1, gv2)
+
+        @R.function
+        def should_not_apply(x: Tensor((m, n), "float32"), y: Tensor((m, n), "float32")):
+            with relax.dataflow():
+                lv0 = relax.multiply(x, y)
+                gv0 = relax.add(lv0, y)
+                relax.output(gv0)
+            gv1 = relax.multiply(x, y)
+            gv2 = relax.add(gv1, y)
+            return (gv0, gv1, gv2)
+
+    @tvm.script.ir_module
+    class Expected:
+        @R.function
+        def should_apply(x: Tensor((m, n), "float32"), y: Tensor((m, n), "float32")):
+            with relax.dataflow():
+                lv0 = relax.add(x, y)
+                gv0 = relax.multiply(lv0, y)
+                relax.output(gv0)
+            gv1 = relax.add(x, y)
+            gv2 = relax.multiply(gv1, y)
+            return (gv0, gv1, gv2)
+
+        @R.function
+        def should_not_apply(x: Tensor((m, n), "float32"), y: Tensor((m, n), "float32")):
+            with relax.dataflow():
+                lv0 = relax.multiply(x, y)
+                gv0 = relax.add(lv0, y)
+                relax.output(gv0)
+            gv1 = relax.multiply(x, y)
+            gv2 = relax.add(gv1, y)
+            return (gv0, gv1, gv2)
+
+    # TODO(@sunggg): Revisit when TVMScript supports annotation.
+    # Annotate target function.
+    Before["should_apply"] = Before["should_apply"].with_attr("is_target", "True")
+    # Since the pass does not remove attribute, Expected also should keep the attribute.
+    Expected["should_apply"] = Expected["should_apply"].with_attr("is_target", "True")
+
+    pass_name = "function_pass_test"
+    opt_level = 0
+    target_attrs = {"is_target": "True"}
+
+    # create FunctionPass with the function_pass decorator
+    @relax.transform.function_pass(opt_level=opt_level, name=pass_name, target_attrs=target_attrs)
+    def decorator_transform(func, mod, ctx):
+        return SwapMAVar().visit_expr(func)
+
+    # check the transform info
+    assert isinstance(decorator_transform, relax.transform.FunctionPass)
+    assert decorator_transform.info.name == pass_name
+    assert decorator_transform.info.opt_level == opt_level
+    # run the transform
+    After = decorator_transform(Before)
+    check_equal(After, Expected)
+
+    # test the case where target_attrs is provided, but no matching function
+    target_attrs = {"is_target": "False"}
+
+    # create FunctionPass with the function_pass decorator
+    @relax.transform.function_pass(opt_level=opt_level, name=pass_name, target_attrs=target_attrs)
+    def decorator_transform(func, mod, ctx):
+        return SwapMAVar().visit_expr(func)
+
+    # check the transform info
+    assert isinstance(decorator_transform, relax.transform.FunctionPass)
+    assert decorator_transform.info.name == pass_name
+    assert decorator_transform.info.opt_level == opt_level
+    # run the transform
+    After = decorator_transform(Before)
+    check_equal(After, Before)
+
+
 def test_dataflowblock_class_pass():
     @relax.transform.dataflowblock_pass(opt_level=1)
     class TestReplaceBinding:
@@ -239,4 +324,6 @@ def test_dataflowblock_pass():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    test_function_pass()
+    test_function_pass_with_target_attr()
+    # pytest.main([__file__])

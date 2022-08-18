@@ -339,7 +339,7 @@ def FuseTIR() -> tvm.ir.transform.Pass:
     return _ffi_api.FuseTIR()
 
 
-def _wrap_class_function_pass(pass_cls, pass_info):
+def _wrap_class_function_pass(pass_cls, pass_info, target_attrs):
     """Wrap a python class as function pass."""
 
     class PyFunctionPass(FunctionPass):
@@ -355,7 +355,9 @@ def _wrap_class_function_pass(pass_cls, pass_info):
             def _pass_func(func, mod, ctx):
                 return inst.transform_function(func, mod, ctx)
 
-            self.__init_handle_by_constructor__(_ffi_api.MakeFunctionPass, _pass_func, pass_info)
+            self.__init_handle_by_constructor__(
+                _ffi_api.MakeFunctionPass, _pass_func, pass_info, target_attrs
+            )
             self._inst = inst
 
         def __getattr__(self, name):
@@ -374,6 +376,7 @@ def function_pass(
     opt_level=None,
     name=None,
     required=None,
+    target_attrs=None,
     traceable=False,
 ) -> Union[Callable, FunctionPass]:
     """Decorate a function pass.
@@ -396,6 +399,11 @@ def function_pass(
 
     required : Optional[List[str]]
         The list of passes that the function pass is dependent on.
+
+    target_attrs: Optional[Map[str, str]]
+        The list of target attributes and their values.
+        If provided, function pass would apply only when one of the target attribute
+        satisfies. Otherwise, it would apply to every function by default.
 
     traceable: Boolean
         Boolean variable whether the function pass is traceable
@@ -475,10 +483,10 @@ def function_pass(
         fname = name if name else pass_arg.__name__
         info = tvm.transform.PassInfo(opt_level, fname, required, traceable)
         if inspect.isclass(pass_arg):
-            return _wrap_class_function_pass(pass_arg, info)
+            return _wrap_class_function_pass(pass_arg, info, target_attrs)
         if not isinstance(pass_arg, (types.FunctionType, types.LambdaType)):
             raise TypeError("pass_func must be a callable for Function pass")
-        return _ffi_api.MakeFunctionPass(pass_arg, info)
+        return _ffi_api.MakeFunctionPass(pass_arg, info, target_attrs)
 
     if pass_func:
         return create_function_pass(pass_func)
