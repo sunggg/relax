@@ -80,6 +80,8 @@ class LowerWithRelayOpStrategyPass:
                 self.is_target_func = True
 
             def visit_call_(self, call_node: Call):
+                if isinstance(call_node.op, relax.GlobalVar):
+                    return call_node
                 # Current relax op name simply adds "relax." prefix to relay op name.
                 # Thus, remove "relax." prefix to deduce relay op name.
                 relay_op_name = call_node.op.name[6:]
