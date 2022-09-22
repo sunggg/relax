@@ -290,6 +290,7 @@ tvm_file_glob(GLOB_RECURSE COMPILER_SRCS
     src/relax/backend/vm/*.cc
     src/relax/backend/task_extraction.cc
     src/relax/utils.cc
+    src/relax/py_ext_runtime.cc
     )
 
 tvm_file_glob(GLOB CODEGEN_SRCS
