@@ -2,6 +2,7 @@ from __future__ import annotations  # must import to defer parsing of annotation
 import tvm
 from tvm import relax
 import onnx
+import numpy as np
 from onnx import helper, TensorProto, OperatorSetIdProto
 import tvm.script
 from tvm.script import relax as R
@@ -47,7 +48,9 @@ class RelaxToOnnxVisitor(PyExprVisitor):
     def visit_function_(self, func: relax.Function) -> None:
         for param in func.params:
             tensor = helper.make_tensor_value_info(
-                param.name_hint, TensorProto.FLOAT, self._shape_expr_to_list(param.shape)
+                param.name_hint,
+                onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(param.checked_type.dtype)],
+                self._shape_expr_to_list(param.shape),
             )
             self._node_dict[param] = tensor
             self._inputs.append(tensor)
@@ -64,7 +67,9 @@ class RelaxToOnnxVisitor(PyExprVisitor):
     def visit_var_binding_(self, binding: relax.VarBinding) -> None:
         # visit var of binding to make onnx tensor
         tensor = helper.make_tensor_value_info(
-            binding.var.name_hint, TensorProto.FLOAT, self._shape_expr_to_list(binding.var.shape)
+            binding.var.name_hint,
+            onnx.mapping.NP_TYPE_TO_TENSOR_TYPE[np.dtype(binding.var.checked_type.dtype)],
+            self._shape_expr_to_list(binding.var.shape),
         )
         self._node_dict[binding.var] = tensor
 
