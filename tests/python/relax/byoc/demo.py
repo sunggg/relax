@@ -6,9 +6,11 @@ import tvm.relay.testing
 import subprocess
 from tvm.script import relax as R
 import tempfile
-from tvm import meta_schedule as ms
+
 from tvm.relax.testing import transform
 from tvm.relax.transform.tuning_api import Trace
+from utils import tune_config, gen_ground_truth, check_executable
+
 
 # TODO:
 # - relax op->onnx converter (func->func)
@@ -17,39 +19,37 @@ target_str = "llvm --num-cores=16"
 target = tvm.target.Target(target_str)
 dev = tvm.device(target_str, 0)
 
-# MS tuning config
-tune_config = ms.TuneConfig(
-    strategy="evolutionary",
-    num_trials_per_iter=4,
-    max_trials_per_task=4,
-    max_trials_global=8,
-)
+
+# Usecase 1: Bring onnx runtime to BYOC
+@tvm.register_func("relax.ext.onnx.runtime")
+def onnx_runtime(onnx_path, num_args, *args):
+    import onnxruntime
+
+    inputs = [args[i].asnumpy() for i in range(num_args.value)]
+    session = onnxruntime.InferenceSession(
+        onnx_path, providers=onnxruntime.get_available_providers()
+    )
+    input_name = session.get_inputs()[0].name
+    outs = session.run(None, {input_name: inputs[0].astype(np.float32)})[0]
+
+    return tvm.nd.array(outs[0], dev)
 
 
-def gen_ground_truth(mod, target, dev, inputs):
-    # Lower and run tuning
-    # Since there is no default schedule for GPU in MS yet, this is necessary
-    with tempfile.TemporaryDirectory() as work_dir:
-        with tvm.transform.PassContext(trace=Trace(mod), opt_level=0):
-            seq = tvm.transform.Sequential(
-                [
-                    transform.LowerWithRelayOpStrategyPass(target),
-                    relax.transform.MetaScheduleTuneIRMod(
-                        target,
-                        config=tune_config,
-                        work_dir=work_dir,
-                        database=None,
-                    ),
-                    relax.transform.MetaScheduleApplyHistoryBest(target, work_dir=work_dir),
-                ]
-            )
-            new_mod = seq(mod)
-    assert relax.analysis.well_formed(new_mod)
-    exec = relax.vm.build(new_mod, target, params={})
-    vm = relax.VirtualMachine(exec, dev)
-    return vm["main"](*inputs)
+@tvm.register_func("relax.ext.onnx")
+def onnx_codegen(func: relax.Function):
+    # TODO: convert relax function -> onnx and dump it to the file
+
+    num_inputs, num_outputs = len(func.params), 1
+    assert func.attrs and "global_symbol" in func.attrs
+    global_symbol = func.attrs["global_symbol"]
+    onnx_path = "bert_full.onnx"
+
+    gen_rt_mod = tvm.get_global_func("relax.CreatePyExtRuntime")
+    assert gen_rt_mod
+    return gen_rt_mod(global_symbol, onnx_path, "relax.ext.onnx.runtime", num_inputs, num_outputs)
 
 
+# Usecase 2: Bring MLIR to BYOC
 @tvm.register_func("relax.ext.mlir.runtime")
 def mlir_runtime(shared_lib_path, num_args, *args):
     from PyRuntime import ExecutionSession
@@ -61,14 +61,13 @@ def mlir_runtime(shared_lib_path, num_args, *args):
 
 
 @tvm.register_func("relax.ext.mlir")
-def mlir_codegen(func: relax.Function):  # func: relax.function):
+def mlir_codegen(func: relax.Function):
     # TODO: convert relax function -> onnx and dump it to the file
-
+    num_inputs, num_outputs = len(func.params), 1
     assert func.attrs and "global_symbol" in func.attrs
     global_symbol = func.attrs["global_symbol"]
     onnx_path = "bert_full.onnx"
     shared_lib_path = onnx_path[:-5] + ".so"
-    num_inputs, num_outputs = len(func.params), 1
 
     # Codegen
     cmd = f"/home/spark/onnx-mlir/build/Debug/bin/onnx-mlir --EmitLib {onnx_path}".split(" ")
@@ -82,14 +81,7 @@ def mlir_codegen(func: relax.Function):  # func: relax.function):
     )
 
 
-def check_executable(exec, dev, inputs, expected):
-    vm = relax.VirtualMachine(exec, dev)
-    # Measure the performance w/o tuning log
-    out = vm["main"](*inputs)
-    tvm.testing.assert_allclose(out.numpy(), expected)
-
-
-def test_single_annot_func():
+def test_single_annot_func(byoc_backend="mlir"):
     @tvm.script.ir_module
     class InputModule:
         @R.function
@@ -108,7 +100,7 @@ def test_single_annot_func():
     assert isinstance(mod, tvm.IRModule)
     # TODO(@sunggg): Revisit when TVMScript supports annotation.
     # Annotate target function.
-    new_relax_func = mod["relax_func"].with_attr("Codegen", "mlir")
+    new_relax_func = mod["relax_func"].with_attr("Codegen", byoc_backend)
     mod["relax_func"] = new_relax_func
 
     # Run Codegen pass
@@ -142,7 +134,7 @@ def test_single_annot_func():
     check_executable(ex0, dev, [data0, data1], expected)
 
 
-def test_mix_use_mlir_and_tvm():
+def test_mix_use_mlir_and_tvm(byoc_backend="mlir"):
     @tvm.script.ir_module
     class InputModule:
         @R.function
@@ -169,7 +161,7 @@ def test_mix_use_mlir_and_tvm():
     mod = InputModule
     assert isinstance(mod, tvm.IRModule)
     # mock_inputs = [tvm.nd.array(np.full([1, 64, 256], 1, np.dtype(np.float32)), device=tvm.cpu(0))]
-    new_mlir_func = mod["mlir_func"].with_attr("Codegen", "mlir")
+    new_mlir_func = mod["mlir_func"].with_attr("Codegen", byoc_backend)
     mod["mlir_func"] = new_mlir_func
 
     # Run Codegen pass
@@ -197,5 +189,7 @@ def test_mix_use_mlir_and_tvm():
 
 
 if __name__ == "__main__":
-    # test_single_annot_func()
-    test_mix_use_mlir_and_tvm()
+    test_single_annot_func(byoc_backend="mlir")
+    test_single_annot_func(byoc_backend="onnx")
+    # test_mix_use_mlir_and_tvm(byoc_backend="mlir")
+    # test_mix_use_mlir_and_tvm(byoc_backend="onnx")

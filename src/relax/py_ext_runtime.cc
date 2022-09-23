@@ -36,7 +36,7 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
   /*! \brief The only subgraph name for this module. */
   String symbol_name_;
   /*! \brief The path to the shared library. */
-  String path_shared_library_;
+  String path_generated_code_;
   /*! \brief The ffi key for runtime. */
   String ffi_key_runtime_;
 
@@ -44,10 +44,10 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
   int num_outputs_;
   // TODO: support const bindings
 
-  ExtRuntimeNode(String symbol_name, String path_shared_library, String ffi_key_runtime,
+  ExtRuntimeNode(String symbol_name, String path_generated_code, String ffi_key_runtime,
                  int num_inputs, int num_outputs)
       : symbol_name_(symbol_name),
-        path_shared_library_(path_shared_library),
+        path_generated_code_(path_generated_code),
         ffi_key_runtime_(ffi_key_runtime),
         num_inputs_(num_inputs),
         num_outputs_(num_outputs) {}
@@ -70,7 +70,7 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
             static const tvm::runtime::PackedFunc* runtime_func =
                 tvm::runtime::Registry::Get(ffi_key_runtime_);
             ICHECK(runtime_func);
-            Array<ObjectRef> arr_args({path_shared_library_});
+            Array<ObjectRef> arr_args({path_generated_code_});
             arr_args.push_back(Integer(num_inputs_));
             for (int i = 0; i < num_inputs_; i++) {
               ICHECK(args[i].type_code() == kTVMNDArrayHandle ||
@@ -88,9 +88,9 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
   }
 };
 
-tvm::runtime::Module Get(String symbol_name, String path_shared_library, String ffi_key_runtime,
+tvm::runtime::Module Get(String symbol_name, String path_generated_code, String ffi_key_runtime,
                          int num_inputs, int num_outputs) {
-  auto n = make_object<ExtRuntimeNode>(symbol_name, path_shared_library, ffi_key_runtime,
+  auto n = make_object<ExtRuntimeNode>(symbol_name, path_generated_code, ffi_key_runtime,
                                        num_inputs, num_outputs);
   return tvm::runtime::Module(n);
 }
