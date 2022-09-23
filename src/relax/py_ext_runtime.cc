@@ -22,6 +22,7 @@
  * \brief Runtime module for python external module.
  */
 #include <tvm/node/reflection.h>
+#include <tvm/relax/tuning_api.h>
 #include <tvm/runtime/module.h>
 #include <tvm/runtime/object.h>
 #include <tvm/runtime/registry.h>
@@ -38,12 +39,18 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
   String path_shared_library_;
   /*! \brief The ffi key for runtime. */
   String ffi_key_runtime_;
+
+  int num_inputs_;
+  int num_outputs_;
   // TODO: support const bindings
 
-  ExtRuntimeNode(String symbol_name, String path_shared_library, String ffi_key_runtime)
+  ExtRuntimeNode(String symbol_name, String path_shared_library, String ffi_key_runtime,
+                 int num_inputs, int num_outputs)
       : symbol_name_(symbol_name),
         path_shared_library_(path_shared_library),
-        ffi_key_runtime_(ffi_key_runtime) {}
+        ffi_key_runtime_(ffi_key_runtime),
+        num_inputs_(num_inputs),
+        num_outputs_(num_outputs) {}
 
   /*! \brief The default destructor. */
   virtual ~ExtRuntimeNode() = default;
@@ -60,12 +67,20 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
     } else if (this->symbol_name_ == name) {
       return tvm::runtime::PackedFunc(
           [sptr_to_self, this](tvm::runtime::TVMArgs args, tvm::runtime::TVMRetValue* rv) {
-            // this->SetInputOutputBuffers(args);
             static const tvm::runtime::PackedFunc* runtime_func =
                 tvm::runtime::Registry::Get(ffi_key_runtime_);
             ICHECK(runtime_func);
-            // TODO: path_shared_library_,
-            (*runtime_func).CallPacked(args, rv);
+            Array<ObjectRef> arr_args({path_shared_library_});
+            arr_args.push_back(Integer(num_inputs_));
+            for (int i = 0; i < num_inputs_; i++) {
+              ICHECK(args[i].type_code() == kTVMNDArrayHandle ||
+                     args[i].type_code() == kTVMDLTensorHandle)
+                  << "Expect NDArray or DLTensor as inputs";
+              arr_args.push_back(args[i]);
+            }
+            DLTensor* out_tensor = args[num_inputs_].operator DLTensor*();
+            tvm::runtime::NDArray res = CallPackedWithArgsInArray(*runtime_func, arr_args);
+            res.CopyTo(out_tensor);
           });
     } else {
       return tvm::runtime::PackedFunc(nullptr);
@@ -73,8 +88,10 @@ class ExtRuntimeNode : public tvm::runtime::ModuleNode {
   }
 };
 
-tvm::runtime::Module Get(String symbol_name, String path_shared_library, String ffi_key_runtime) {
-  auto n = make_object<ExtRuntimeNode>(symbol_name, path_shared_library, ffi_key_runtime);
+tvm::runtime::Module Get(String symbol_name, String path_shared_library, String ffi_key_runtime,
+                         int num_inputs, int num_outputs) {
+  auto n = make_object<ExtRuntimeNode>(symbol_name, path_shared_library, ffi_key_runtime,
+                                       num_inputs, num_outputs);
   return tvm::runtime::Module(n);
 }
 TVM_REGISTER_GLOBAL("relax.CreatePyExtRuntime").set_body_typed(Get);
