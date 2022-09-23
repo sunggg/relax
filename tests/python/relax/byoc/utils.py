@@ -47,4 +47,4 @@ def check_executable(exec, dev, inputs, expected):
     vm = relax.VirtualMachine(exec, dev)
     # Measure the performance w/o tuning log
     out = vm["main"](*inputs)
-    tvm.testing.assert_allclose(out.numpy(), expected)
+    tvm.testing.assert_allclose(out.numpy(), expected.numpy(), atol=1e-5, rtol=1e-5)
