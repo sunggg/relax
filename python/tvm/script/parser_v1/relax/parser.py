@@ -1341,7 +1341,67 @@ class RelaxTransformer(Transformer):
                             ),
                             expr.span,
                         )
+            elif op.name == "relax.extern_op":
+                if len(args) != op.num_inputs and len(args) != op.num_inputs - 1:
+                    self.report_error(
+                        f"""{op.name} expects {op.num_inputs} or {op.num_inputs - 1}
+                        arguments but got {len(args)}""",
+                        expr.span,
+                    )
 
+                if len(expr.keyword_params) != 1:
+                    self.report_error(
+                        f"""{op.name} expects exact one keyword argument with dtype as the key but
+                        got {len(expr.keyword_params)} keyword arguments""",
+                        expr.span,
+                    )
+
+                assert isinstance(args[0], str) and isinstance(args[1], str)
+
+                for key, val in expr.keyword_params.items():
+                    assert isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    if key.value == "dtype":
+                        val = self.transform_expr(val)
+                        # single output case
+                        if isinstance(val, str):
+                            if not isinstance(args[3], relax.ShapeExpr):
+                                self.report_error(
+                                    (
+                                        f"The number of output_shape and output_dtype of "
+                                        f"call_tir mismatch"
+                                    ),
+                                    expr.span,
+                                )
+                            type_args = [relax.DynTensorType(ndim=len(args[3].values), dtype=val)]
+                        elif isinstance(val, Tuple):
+                            # multiple outputs case
+                            if not isinstance(args[2], Tuple) and len(args[3]) != len(val):
+                                self.report_error(
+                                    (
+                                        f"The number of output_shape and output_dtype of "
+                                        f"call_tir mismatch"
+                                    ),
+                                    expr.span,
+                                )
+                            types = []
+                            for i in range(len(args[3])):
+                                types.append(
+                                    relax.DynTensorType(ndim=len(args[3][i].values), dtype=val[i])
+                                )
+                            type_args = [relax.TupleType(types)]
+                        else:
+                            self.report_error(
+                                f"call_tir expects the output_dtype to be a string or a tuple",
+                                expr.span,
+                            )
+                    else:
+                        self.report_error(
+                            (
+                                f"{op.name} expects one keyword argument with dtype as the key but "
+                                f"got {len(key.value)} as the key"
+                            ),
+                            expr.span,
+                        )
             elif op.num_inputs != -1 and len(args) != op.num_inputs:
                 self.report_error(
                     f"{op.name} expects {op.num_inputs} arguments but got {len(args)}", expr.span
@@ -1353,8 +1413,13 @@ class RelaxTransformer(Transformer):
         else:
             self.report_error(f"unsupported function in call: {op}", expr.func_name.span)
 
-        if isinstance(op, tvm.ir.Op) and op.name == "relax.call_tir":
-            attrs = None
+        if isinstance(op, tvm.ir.Op):
+            if op.name == "relax.call_tir":
+                attrs = None
+            elif op.name == "relax.extern_op":
+                dict_form = {"extern_kind": args[0], "op_name": args[1]}
+                attrs = tvm.ir.attrs.make_node(op.attrs_type_key, **dict_form)
+                args = args[2:]
         else:
             attrs, type_args = self.parse_call_attr(expr)
 

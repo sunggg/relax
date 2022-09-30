@@ -81,6 +81,38 @@ def call_tir(
     return _ffi_api.call_tir(func, args, shape, output_type, tir_vars)
 
 
+def extern_op(
+    extern_kind: str,
+    op_name: str,
+    args: Union[Expr, Tuple, List[Expr]],
+    shape: Union[Tuple, ShapeExpr, List[int]],
+    dtype: Union[str, List[str]],
+) -> Call:
+    """
+    TODO: FILLME
+    """
+
+    if isinstance(shape, (list, tuple, Array)):
+        shape = ShapeExpr(shape)
+
+    if isinstance(args, Expr):
+        args = Tuple((args,))
+
+    if isinstance(args, (list, tuple)):
+        args = Tuple(args)
+
+    if isinstance(dtype, str):
+        output_type = DynTensorType(len(shape), dtype)
+    elif isinstance(dtype, (list, tuple)):
+        if len(shape) != len(dtype):
+            raise ValueError("The number of output_shape and output_dtype of extern op mismatch")
+        output_type = TupleType([DynTensorType(len(x), y) for x, y in zip(shape, dtype)])
+    else:
+        raise TypeError("Not supported dtype for extern op: " + str(type(dtype)))
+
+    return _ffi_api.extern_op(extern_kind, op_name, args, shape, output_type)
+
+
 def make_closure(
     func: Expr,
     args: Union[Tuple, List[Expr]],
