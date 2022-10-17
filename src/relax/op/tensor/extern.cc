@@ -58,10 +58,12 @@ namespace relax {
 struct ExternOpAttrs : public tvm::AttrsNode<ExternOpAttrs> {
   std::string extern_kind;
   std::string op_name;
+  Array<ObjectRef> args;
 
   TVM_DECLARE_ATTRS(ExternOpAttrs, "relax.attrs.ExternOpAttrs") {
     TVM_ATTR_FIELD(extern_kind).set_default("torch").describe("External Execution Provider");
     TVM_ATTR_FIELD(op_name).set_default("").describe("Operator");
+    TVM_ATTR_FIELD(args).set_default(Array<ObjectRef>({})).describe("Arguments");
   }
 };
 
@@ -85,17 +87,19 @@ RELAY_REGISTER_OP("relax.extern_op")
     .set_attrs_type<ExternOpAttrs>()
     .set_num_inputs(5)
     .add_argument("args", "Tuple", "The input arguments.")
-    .add_argument("output_shape", "Expr", "The output shape.")
+    //.add_argument("output_shape", "Expr", "The output shape.")
     .set_attr<FInferType>("FInferType", InferTypeExternOp)
     .set_attr<FInferShape>("FInferShapeExternOp", InferShapeExternOp);
 
-Expr MakeExternOp(std::string extern_kind, std::string op_name, Tuple args, Expr output_shape,
-                  Type output_type) {
+Expr MakeExternOp(std::string extern_kind, std::string op_name, Tuple tensor_args,
+                  Array<ObjectRef> attrs_args) {  //, Expr output_shape, Type output_type) {
   auto attrs = make_object<ExternOpAttrs>();
   attrs->extern_kind = extern_kind;
   attrs->op_name = op_name;
+  attrs->args = attrs_args;
   static const Op& op = Op::Get("relax.extern_op");
-  return Call(op, {args, output_shape}, Attrs(attrs), {output_type});
+  return Call(op, {tensor_args}, Attrs(attrs), {});
+  // return Call(op, {tensor_args, output_shape}, Attrs(attrs), {output_type});
 }
 
 TVM_REGISTER_GLOBAL("relax.op.extern_op").set_body_typed(MakeExternOp);

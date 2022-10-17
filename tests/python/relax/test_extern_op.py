@@ -6,8 +6,10 @@ from tvm import ir
 from tvm.ir import transform
 from tvm.relax.expr import Call, Function, GlobalVar, ExternFunc, Tuple
 from tvm.relax import PyExprMutator
-import torch
+
 import tvm.relay.testing
+import torch
+from torchvision import models  # type: ignore
 
 # Target and device configs
 target_str = "llvm --num-cores=16"
@@ -182,6 +184,25 @@ def test_extern_op_with_tvm_script():
     tvm.testing.assert_allclose(out.numpy(), expected.numpy(), atol=1e-5, rtol=1e-5)
 
 
+def test_torchvision():
+    model = models.resnet50(pretrained=True)
+    dtype = "float32"
+    input_name, input_shape = "input0", (1, 3, 224, 224)
+    input_data = torch.randn(input_shape).type(  # pylint: disable=no-member
+        {
+            "float32": torch.float32,  # pylint: disable=no-member
+        }[dtype]
+    )
+
+    # from tvm.meta_schedule.testing.relay_workload import _get_network
+    # __ = _get_network(("resnet_50", input_shape))
+
+    scripted_model = torch.jit.trace(model, input_data).eval()
+    shape_list = [(input_name, input_shape)]
+    mod, params = relax.frontend.from_pytorch_traced_script(scripted_model, shape_list)
+
+
 if __name__ == "__main__":
     # test_extern_op()
-    test_extern_op_with_tvm_script()
+    # test_extern_op_with_tvm_script()
+    test_torchvision()

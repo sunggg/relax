@@ -84,23 +84,23 @@ def call_tir(
 def extern_op(
     extern_kind: str,
     op_name: str,
-    args: Union[Expr, Tuple, List[Expr]],
-    shape: Union[Tuple, ShapeExpr, List[int]],
-    dtype: Union[str, List[str]],
+    tensor_args: Union[Expr, Tuple, List[Expr]],
+    attrs_args: List[Object],
+    # shape: Union[Tuple, ShapeExpr, List[int]],
+    # dtype: Union[str, List[str]],
 ) -> Call:
     """
     TODO: FILLME
     """
 
+    if isinstance(tensor_args, Expr):
+        tensor_args = Tuple((tensor_args,))
+
+    if isinstance(tensor_args, (list, tuple)):
+        tensor_args = Tuple(tensor_args)
+    """
     if isinstance(shape, (list, tuple, Array)):
         shape = ShapeExpr(shape)
-
-    if isinstance(args, Expr):
-        args = Tuple((args,))
-
-    if isinstance(args, (list, tuple)):
-        args = Tuple(args)
-
     if isinstance(dtype, str):
         output_type = DynTensorType(len(shape), dtype)
     elif isinstance(dtype, (list, tuple)):
@@ -109,8 +109,10 @@ def extern_op(
         output_type = TupleType([DynTensorType(len(x), y) for x, y in zip(shape, dtype)])
     else:
         raise TypeError("Not supported dtype for extern op: " + str(type(dtype)))
+    """
 
-    return _ffi_api.extern_op(extern_kind, op_name, args, shape, output_type)
+    # return _ffi_api.extern_op(extern_kind, op_name, tensor_args, attrs_args, shape, output_type)
+    return _ffi_api.extern_op(extern_kind, op_name, tensor_args, attrs_args)
 
 
 def make_closure(

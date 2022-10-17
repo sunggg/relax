@@ -25,6 +25,7 @@ from . import op
 from . import analysis
 from . import transform
 from . import expr_functor
+from . import frontend
 
 # Expr
 Expr = expr.Expr
