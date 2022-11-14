@@ -196,7 +196,11 @@ class BlockBuilder(Object):
         te_args_list = []
 
         def _convert_te_arg_helper(arg):
-            if isinstance(arg, Expr):  # type: ignore
+            # TODO(@tvm-team): quick hack to handle ShapeExpr
+            # https://github.com/mlc-ai/relax/pull/14/files#r1002320397
+            if isinstance(arg, ShapeExpr):
+                return [_convert_te_arg_helper(x) for x in arg.values]
+            elif isinstance(arg, Expr):
                 arg = te_tensor(arg)
                 te_args_list.append(arg)
                 return arg
