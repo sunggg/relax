@@ -75,6 +75,7 @@ def verify_model(
 
     target, dev = tvm.target.Target("llvm --num-cores=16"), tvm.cpu()
     mod = relax.frontend.from_torch_fx(baseline_model, input_infos)
+
     with tempfile.TemporaryDirectory() as work_dir:
         with tvm.transform.PassContext(opt_level=3):
             mod = transform.LowerWithRelayOpStrategyPass(target)(mod)
@@ -107,37 +108,54 @@ def verify_model(
 
 @tvm.testing.uses_gpu
 def test_forward_add():
-    """test_forward_add"""
     torch.set_grad_enabled(False)
     input_shape = [10]
 
-    class Add1(Module):
+    class Mod1(Module):
         def forward(self, x0, x1):
             return x0 + x1
 
-    class Add2(Module):
+    class Mod2(Module):
         def forward(self, x):
             return x + 1
 
-    class Add3(Module):
+    class Mod3(Module):
         def forward(self, x):
-            ones = torch.ones(input_shape, dtype=torch.float)
+            y = torch.ones(input_shape, dtype=torch.float) * 2
             if torch.cuda.is_available():
-                ones = ones.cuda()
-            return x + ones
-
-    class Add4(Module):
-        def forward(self, x):
-            ones = torch.ones([], dtype=torch.float)
-            if torch.cuda.is_available():
-                ones = ones.cuda()
-            return x + ones
+                y = y.cuda()
+            return x + y
 
     input_data = torch.rand(input_shape).float()
-    verify_model(Add1(), input_data=[input_data, input_data])
-    verify_model(Add2().float().eval(), input_data=input_data)
-    verify_model(Add3().float().eval(), input_data=input_data)
-    verify_model(Add4().float().eval(), input_data=input_data)
+    verify_model(Mod1(), input_data=[input_data, input_data])
+    verify_model(Mod2(), input_data=input_data)
+    verify_model(Mod3(), input_data=input_data)
+
+
+@tvm.testing.uses_gpu
+def test_forward_matmul():
+    torch.set_grad_enabled(False)
+    input_shape = [10]
+
+    class Mod1(Module):
+        def forward(self, x0, x1):
+            return x0 * x1
+
+    class Mod2(Module):
+        def forward(self, x):
+            return x * 2
+
+    class Mod3(Module):
+        def forward(self, x):
+            y = torch.ones(input_shape, dtype=torch.float) * 2
+            if torch.cuda.is_available():
+                y = y.cuda()
+            return x * y
+
+    input_data = torch.rand(input_shape).float()
+    verify_model(Mod1(), input_data=[input_data, input_data])
+    verify_model(Mod2(), input_data=input_data)
+    verify_model(Mod3(), input_data=input_data)
 
 
 if __name__ == "__main__":

@@ -146,6 +146,12 @@ class TorchFXTranslator:
             return self._call_binary_op(relax.op.add, lhs, rhs)
         return lhs + rhs
 
+    def _mul(self, node: fx.node.Node) -> relax.Var:
+        lhs, rhs = self.retrive_args(node)
+        if isinstance(lhs, relax.Var) or isinstance(rhs, relax.Var):
+            return self._call_binary_op(relax.op.multiply, lhs, rhs)
+        return lhs * rhs
+
     """
     # TODO(@sunggg): 
     # These operators are supported in mlc, but not in relax branch yet.
@@ -357,13 +363,6 @@ class TorchFXTranslator:
             return self.bb.emit(relax.op.reshape(sliced, sliced_shape))
         else:
             assert False
-
-    def _mul(self, node: fx.node.Node) -> relax.Var:
-        lhs, rhs = self.retrive_args(node)
-        if isinstance(lhs, relax.Var) or isinstance(rhs, relax.Var):
-            return self._call_binary_op(relax.op.multiply, lhs, rhs)
-        else:
-            return lhs * rhs
 
     def _sin(self, node: fx.node.Node) -> relax.Var:
         return self.bb.emit(relax.op.sin(self.env[node.args[0]]))
@@ -591,6 +590,7 @@ class TorchFXTranslator:
     def create_convert_map(self):
         self.convert_map = {
             "add": self._add,
+            "mul": self._mul,
         }
 
         """
