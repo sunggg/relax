@@ -15,12 +15,14 @@
 # specific language governing permissions and limitations
 # under the License.
 from numpy import iterable
-import torch
-import tvm
 
+import torch
 from torch import nn, fx
+
+import tvm
 from tvm import relax, topi
 import numpy as np
+import operator
 
 
 class TorchFXTranslator:
@@ -589,8 +591,12 @@ class TorchFXTranslator:
 
     def create_convert_map(self):
         self.convert_map = {
-            "add": self._add,
-            "mul": self._mul,
+            # Torch operators
+            torch.add: self._add,
+            torch.mul: self._mul,
+            # Python builtin operators
+            operator.add: self._add,
+            operator.mul: self._mul,
         }
 
         """
@@ -663,8 +669,8 @@ class TorchFXTranslator:
 def from_torch_fx(model, input_infos):
     translator = TorchFXTranslator()
     translator.named_modules = dict(model.named_modules())
-
-    graph: fx.Graph = fx.Tracer().trace(model)
+    symbolic_traced: fx.GraphModule = fx.symbolic_trace(model)
+    graph = symbolic_traced.graph
 
     # Extract input names from the graph
     graph_input_names = [node.name for node in graph.nodes if node.op == "placeholder"]
@@ -710,17 +716,13 @@ def from_torch_fx(model, input_infos):
                         type(module) in translator.convert_map
                     ), f"Unsupported module type {type(module)}"
                     translator.env[node] = translator.convert_map[type(module)](node)
-                elif node.op == "call_function":
-                    func_name = node.name.rstrip("0123456789_")
+                elif node.op in ["call_function", "call_method"]:
+                    func = getattr(torch, node.target) if node.op == "call_method" else node.target
                     assert (
-                        func_name in translator.convert_map
-                    ), f"Unsupported function type {func_name}"
-                    translator.env[node] = translator.convert_map[func_name](node)
-                elif node.op == "call_method":
-                    assert (
-                        node.target in translator.convert_map
-                    ), f"Unsupported function target {node.target}"
-                    translator.env[node] = translator.convert_map[node.target](node)
+                        func in translator.convert_map
+                    ), f"Unsupported method target {node.target}"
+
+                    translator.env[node] = translator.convert_map[func](node)
                 else:
                     raise ValueError(f"Unsupported op {node.op}")
         assert output is not None

@@ -19,6 +19,7 @@
 
 import sys
 import tempfile
+import numpy as np
 import torch
 from torch.nn import Module
 from torch.nn import functional as F
@@ -41,6 +42,7 @@ def verify_model(
     input_data=None,
     rtol=1e-5,
     atol=1e-5,
+    use_cpu=False,
 ):
     """Assert that the output of a compiled model matches with that of its
     baseline."""
@@ -55,7 +57,7 @@ def verify_model(
     else:
         assert False, "Unexpected input format"
 
-    if torch.cuda.is_available():
+    if not use_cpu and torch.cuda.is_available():
         if isinstance(baseline_model, torch.nn.Module):
             baseline_model = baseline_model.cuda()
         baseline_input = [inp.cuda() for inp in baseline_input]
@@ -113,23 +115,43 @@ def test_forward_add():
 
     class Mod1(Module):
         def forward(self, x0, x1):
+            # use python builtin op
             return x0 + x1
 
     class Mod2(Module):
-        def forward(self, x):
-            return x + 1
+        def forward(self, x0, x1):
+            # use torch op
+            return torch.add(x0, x1)
 
     class Mod3(Module):
         def forward(self, x):
-            y = torch.ones(input_shape, dtype=torch.float) * 2
+            return x + 1
+
+    class Mod4(Module):
+        def forward(self, x):
+            return torch.add(x, 1)
+
+    class Mod5(Module):
+        def forward(self, x):
+            y = torch.ones(input_shape, dtype=torch.float)
             if torch.cuda.is_available():
                 y = y.cuda()
             return x + y
 
+    class Mod6(Module):
+        def forward(self, x):
+            y = torch.ones(input_shape, dtype=torch.float)
+            if torch.cuda.is_available():
+                y = y.cuda()
+            return torch.add(x, y)
+
     input_data = torch.rand(input_shape).float()
     verify_model(Mod1(), input_data=[input_data, input_data])
-    verify_model(Mod2(), input_data=input_data)
+    verify_model(Mod2(), input_data=[input_data, input_data])
     verify_model(Mod3(), input_data=input_data)
+    verify_model(Mod4(), input_data=input_data)
+    verify_model(Mod5(), input_data=input_data)
+    verify_model(Mod6(), input_data=input_data)
 
 
 @tvm.testing.uses_gpu
@@ -139,23 +161,43 @@ def test_forward_matmul():
 
     class Mod1(Module):
         def forward(self, x0, x1):
+            # use python builtin op
             return x0 * x1
 
     class Mod2(Module):
+        def forward(self, x0, x1):
+            # use torch op
+            return torch.mul(x0, x1)
+
+    class Mod3(Module):
         def forward(self, x):
             return x * 2
 
-    class Mod3(Module):
+    class Mod4(Module):
+        def forward(self, x):
+            return torch.mul(x, 2)
+
+    class Mod5(Module):
         def forward(self, x):
             y = torch.ones(input_shape, dtype=torch.float) * 2
             if torch.cuda.is_available():
                 y = y.cuda()
             return x * y
 
+    class Mod6(Module):
+        def forward(self, x):
+            y = torch.ones(input_shape, dtype=torch.float) * 2
+            if torch.cuda.is_available():
+                y = y.cuda()
+            return torch.mul(x, y)
+
     input_data = torch.rand(input_shape).float()
     verify_model(Mod1(), input_data=[input_data, input_data])
-    verify_model(Mod2(), input_data=input_data)
+    verify_model(Mod2(), input_data=[input_data, input_data])
     verify_model(Mod3(), input_data=input_data)
+    verify_model(Mod4(), input_data=input_data)
+    verify_model(Mod5(), input_data=input_data)
+    verify_model(Mod6(), input_data=input_data)
 
 
 if __name__ == "__main__":
