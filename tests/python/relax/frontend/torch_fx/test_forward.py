@@ -77,6 +77,8 @@ def verify_model(
 
     target, dev = tvm.target.Target("llvm --num-cores=16"), tvm.cpu()
     mod = relax.frontend.from_torch_fx(baseline_model, input_infos)
+    print(mod)
+    assert 0
 
     with tempfile.TemporaryDirectory() as work_dir:
         with tvm.transform.PassContext(opt_level=3):
@@ -200,5 +202,20 @@ def test_forward_matmul():
     verify_model(Mod6(), input_data=input_data)
 
 
+@tvm.testing.uses_gpu
+def test_forward_abs():
+    torch.set_grad_enabled(False)
+    input_shape = [10]
+
+    class Mod1(Module):
+        def forward(self, x):
+            return torch.abs(x)
+
+    input_data = torch.rand(input_shape).float() - 0.5
+    verify_model(Mod1(), input_data=input_data)
+
+
 if __name__ == "__main__":
-    tvm.testing.main()
+    # test_forward_matmul()
+    test_forward_abs()
+    # tvm.testing.main()

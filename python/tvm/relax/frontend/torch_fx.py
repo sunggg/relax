@@ -14,10 +14,13 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+from typing import List, Dict, Callable, Tuple
 from numpy import iterable
+import os
 
 import torch
 from torch import nn, fx
+from torch.fx.passes.split_module import split_module
 
 import tvm
 from tvm import relax, topi
@@ -26,12 +29,12 @@ import operator
 
 
 class TorchFXTranslator:
-    def __init__(self) -> None:
+    def __init__(self, module: fx.GraphModule) -> None:
         self.env = {}
         self.params = {}
         self.params_transpose = {}
-        self.named_modules = None
-        self.bb = None
+        self.named_modules = dict(module.named_modules())
+        self.bb = relax.BlockBuilder()
         self.create_convert_map()
 
     @staticmethod
@@ -97,6 +100,17 @@ class TorchFXTranslator:
         elif isinstance(tensor, relax.Constant):
             return tensor.data.shape
 
+    @staticmethod
+    def type_of(tensor):
+        # TODO(@tvm-team): Since `relax.const` does not populate `checked_type` now,
+        # we manually reconstruct type info as a temporary solution.
+        if isinstance(tensor, relax.Constant):
+            ndim = len(tensor.data.shape)
+            dtype = TorchFXTranslator._convert_data_type(str(tensor.data.dtype))
+            return relax.DynTensorType(ndim, dtype)
+        else:
+            return tensor.checked_type
+
     def retrive_args(self, node):
         return self._retrive_args(node.args)
 
@@ -154,441 +168,8 @@ class TorchFXTranslator:
             return self._call_binary_op(relax.op.multiply, lhs, rhs)
         return lhs * rhs
 
-    """
-    # TODO(@sunggg): 
-    # These operators are supported in mlc, but not in relax branch yet.
-    # Test them out when they are ready.                
-    def _conv2d(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        module = self.named_modules[node.target]
-        weight = self.params[module.weight]
-        weight_shape = weight.data.shape
-
-        kernel_size = weight_shape[2:]
-        out_channels = weight_shape[1]
-
-        conv2d = self.bb.emit(
-            relax.op.nn.conv2d(
-                x,
-                weight,
-                kernel_size,
-                strides=module.stride,
-                padding=module.padding,
-                dilation=module.dilation,
-                groups=module.groups,
-                channels=out_channels,
-                data_layout="NCHW",
-                kernel_layout="OIHW",
-            )
-        )
-
-        if module.bias is None:
-            return conv2d
-
-        bias = self.params[module.bias]
-        if len(bias.data.shape) == 1:
-            reshaped_bias = relax.const(
-                bias.data.numpy().reshape(1, -1, 1, 1),
-                relax.DynTensorType(4, bias.data.dtype),
-            )
-            bias = self.params[module.bias] = reshaped_bias
-
-        return self.bb.emit(relax.op.add(conv2d, bias))
-
-    def _linear(self, node: fx.node.Node) -> relax.Var:
-
-        x = self.env[node.args[0]]
-        module = self.named_modules[node.target]
-        weight = self.params[module.weight]
-        if module.weight not in self.params_transpose:
-            self.params_transpose[module.weight] = self._convert_torch_tensor_to_relax(
-                module.weight.T
-            )
-
-        weight_T = self.params_transpose[module.weight]
-        dense = self._matmul_impl(x, weight_T)
-
-        if module.bias is None:
-            return dense
-
-        bias = self.params[module.bias]
-        if len(bias.data.shape) == 1:
-            reshaped_bias = relax.const(
-                bias.data.numpy().reshape(1, -1),
-                relax.DynTensorType(2, bias.data.dtype),
-            )
-            bias = self.params[module.bias] = reshaped_bias
-
-        return self.bb.emit(relax.op.add(dense, bias))
-
-    def _relu(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        return self.bb.emit(relax.nn.relu(x))
-
-    def _max_pool2d(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        if node.target in self.named_modules:
-            module = self.named_modules[node.target]
-            kernel = module.kernel_size
-            stride = module.stride
-            padding = module.padding
-            dilation = module.dilation
-        else:
-            nargs = len(node.args)
-            kernel = node.args[1] if nargs > 1 else node.kwargs["kernel_size"]
-            stride = node.args[2] if nargs > 2 else node.kwargs["stride"]
-            padding = node.args[3] if nargs > 3 else node.kwargs["padding"]
-            dilation = node.args[4] if nargs > 4 else node.kwargs["dilation"]
-
-        kernel = kernel if isinstance(kernel, tuple) else (kernel, kernel)
-        stride = kernel if stride is None else stride
-        stride = stride if isinstance(stride, tuple) else (stride, stride)
-        padding = padding if isinstance(padding, tuple) else (padding, padding, padding, padding)
-        dilation = dilation if isinstance(dilation, tuple) else (dilation, dilation)
-
-        return self.bb.emit_te(
-            topi.nn.pool2d,
-            x,
-            kernel,
-            stride,
-            dilation,
-            padding,
-            pool_type="max",
-        )
-
-    def _embedding(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        module = self.named_modules[node.target]
-        weight = self.params[module.weight]
-        x = self.bb.emit_te(topi.cast, x, "int32")
-        return self.bb.emit_te(topi.take, weight, x, axis=0)
-
-    def _adaptive_avg_pool2d(self, node: fx.node.Node) -> relax.Var:
-        module = self.named_modules[node.target]
-        x = self.env[node.args[0]]
-
-        return self.bb.emit_te(
-            topi.nn.adaptive_pool, x, module.output_size, pool_type="avg", layout="NCHW"
-        )
-
-    def _flatten(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        if node.target in self.named_modules:
-            module = self.named_modules[node.target]
-            start_dim = module.start_dim
-            end_dim = module.end_dim
-        else:
-            start_dim = node.args[1] if len(node.args) >= 2 else 0
-            end_dim = node.args[2] if len(node.args) == 3 else -1
-        assert start_dim == 1 and end_dim == -1
-        return self.bb.emit(relax.op.flatten(x))
-
-    def _batch_norm_2d(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        module = self.named_modules[node.target]
-        weight = self.params[module.weight]
-        bias = self.params[module.bias]
-        dtype = self._convert_data_type(str(module.running_mean.dtype))
-        running_mean = relax.const(module.running_mean.cpu().detach().numpy(), dtype)
-        running_var = relax.const(module.running_var.cpu().detach().numpy(), dtype)
-        eps = module.eps
-
-        res_tuple = self.bb.emit(
-            relax.op.nn.batch_norm(x, weight, bias, running_mean, running_var, axis=1, epsilon=eps)
-        )
-
-        return self.bb.emit(relax.TupleGetItem(res_tuple, 0))
-
-    def _sub(self, node: fx.node.Node) -> relax.Var:
-        lhs, rhs = self.retrive_args(node)
-        if isinstance(lhs, relax.Var) or isinstance(rhs, relax.Var):
-            return self._call_binary_op(relax.op.subtract, lhs, rhs)
-        return lhs - rhs
-
-    def _cumsum(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        axis = node.args[1]
-        return self.bb.emit_te(topi.cumsum, x, axis)
-
-    def _size(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        if len(node.args) == 1:
-            assert isinstance(x.shape, relax.ShapeExpr)
-            return tuple(s.value for s in x.shape.values)
-        assert len(node.args) == 2
-        idx = node.args[1]
-        return x.shape[idx].value
-
-    def _getattr(self, node: fx.node.Node) -> relax.Var:
-        return getattr(self.env[node.args[0]], node.args[1])
-
-    def _getitem(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        if iterable(x):
-            return x[node.args[1]]
-        elif isinstance(x, relax.Var):
-            if isinstance(x.shape, relax.Tuple):
-                return self.bb.emit(relax.TupleGetItem(x, node.args[1]))
-            else:
-                begin = []
-            end = []
-            stride = []
-            axes = []
-            expand_dim = []
-            i = 0
-            for index in node.args[1]:
-                if isinstance(index, int):
-                    begin.append(index)
-                    end.append(index + 1)
-                    stride.append(1)
-                    axes.append(i)
-                    i = i + 1
-                elif isinstance(index, slice):
-                    begin.append(0 if index.start is None else index.start)
-                    end.append(x.shape_[i] if index.stop is None else index.stop)
-                    stride.append(1 if index.step is None else index.step)
-                    axes.append(i)
-                    i = i + 1
-                elif index is None:
-                    expand_dim.append(i)
-                else:
-                    raise ValueError("Unsupported index type: " + str(type(index)))
-            while i < len(x.shape_):
-                begin.append(0)
-                end.append(x.shape_[i])
-                axes.append(i)
-                i = i + 1
-            sliced = self.bb.emit_te(topi.strided_slice, x, begin, end, stride, axes)
-            sliced_shape = list(sliced.shape_)
-            for i in expand_dim:
-                sliced_shape.insert(i, 1)
-            return self.bb.emit(relax.op.reshape(sliced, sliced_shape))
-        else:
-            assert False
-
-    def _sin(self, node: fx.node.Node) -> relax.Var:
-        return self.bb.emit(relax.op.sin(self.env[node.args[0]]))
-
-    def _cos(self, node: fx.node.Node) -> relax.Var:
-        return self.bb.emit(relax.op.cos(self.env[node.args[0]]))
-
-    def _cat(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        return self.bb.emit(relax.op.concatenate(args[0], axis=node.kwargs["dim"]))
-
-    def _truediv(self, node: fx.node.Node) -> relax.Var:
-        lhs, rhs = self.retrive_args(node)
-        if isinstance(lhs, relax.Var) or isinstance(rhs, relax.Var):
-            return self._call_binary_op(relax.op.divide, lhs, rhs)
-        else:
-            return lhs / rhs
-
-    def _floordiv(self, node: fx.node.Node) -> relax.Var:
-        lhs, rhs = self.retrive_args(node)
-        if isinstance(lhs, relax.Var) or isinstance(rhs, relax.Var):
-            return self._call_binary_op(relax.op.floor_divide, lhs, rhs)
-        else:
-            return lhs // rhs
-
-    def _matmul(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        res = self._matmul_impl(
-            args[0],
-            args[1],
-        )
-        return res
-
-    def _matmul_impl(self, a: relax.Expr, b: relax.Expr):
-        return self.bb.emit(relax.op.nn.matmul(a, b))
-
-    def _gelu(self, node: fx.node.Node) -> relax.Var:
-        return self.bb.emit(relax.op.gelu(self.env[node.args[0]]))
-
-    def _interpolate(self, node: fx.node.Node) -> relax.Var:
-        # torch.nn.functional.interpolate(
-        #   input, size=None, scale_factor=None, mode='nearest', align_corners=None, recompute_scale_factor=None, antialias=False)
-        # (TODO) this is a temporary implementation for interpolate that only considers NCHW layout
-        # it basically replicates the implementation in tvm.relay.frontend.pytorch
-        data = self.env[node.args[0]]
-        size = node.kwargs["size"]
-        scale_factor = node.kwargs["scale_factor"]
-        method = node.kwargs["mode"]
-        align_corners = node.kwargs["align_corners"]
-        recompute_scale_factor = node.kwargs["recompute_scale_factor"]
-        antialias = node.kwargs["antialias"]
-
-        assert recompute_scale_factor is None
-        assert antialias is False
-
-        if size is None:
-            shape = self.shape_of(data)
-            assert isinstance(shape, relax.ShapeExpr)
-            size = tuple(int(shape[i].value * scale_factor) for i in range(2, len(shape)))
-
-        if method.startswith("nearest"):
-            method = "nearest_neighbor"
-        elif method[0:2] == "bi":
-            method = method[2:]
-
-        if method == "nearest_neighbor":
-            coord_trans = "asymmetric"
-        elif align_corners:
-            coord_trans = "align_corners"
-        else:
-            coord_trans = "half_pixel"
-
-        return self.bb.emit_te(
-            topi.image.resize2d,
-            data,
-            [0.0] * 4,
-            size,
-            layout="NCHW",
-            method=method,
-            coordinate_transformation_mode=coord_trans,
-        )
-
-    def _addmm(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        y = self.env[node.args[1]]
-        z = self.env[node.args[2]]
-        matmul = self.bb.emit_te(topi.matmul, y, z)
-        return self.bb.emit(relax.op.add(x, matmul))
-
-    def _split(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        split_size = node.args[1]
-        if "dim" in node.kwargs:
-            dim = node.kwargs["dim"]
-        else:
-            dim = 0
-        split_size = x.shape[dim].value // split_size
-        return self.bb.emit_te(topi.split, x, split_size, dim)
-
-    def _tril(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        k = node.args[1] if len(node.args) > 1 else 0
-        return self.bb.emit_te(topi.trilu, x, tvm.tir.const(k, "int32"), False)
-
-    def _new_ones(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        self_var = args[0]
-        size = args[1:]
-        if not iterable(size):
-            size = (size,)
-        return self.bb.emit_te(topi.full, size, fill_value=1, dtype=self_var.checked_type.dtype)
-
-    def _expand(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        return self.bb.emit_te(topi.broadcast_to, args[0], args[1:])
-
-    def _float(self, node: fx.node.Node) -> relax.Var:
-        return self.bb.emit_te(topi.cast, self.env[node.args[0]], "float32")
-
-    def _permute(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        return self.bb.emit(relax.op.transpose(args[0], args[1:]))
-
-    def _reshape(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        infer_idx = -1
-        prod = 1
-        for i in range(1, len(args)):
-            if args[i] == -1:
-                infer_idx = i
-            else:
-                prod *= args[i]
-        if infer_idx != -1:
-            args[infer_idx] = np.prod(args[0].shape).value // prod
-        return self.bb.emit(relax.op.reshape(args[0], args[1:]))
-
-    def _transpose(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        full_idx = [i for i in range(len(args[0].shape))]
-        full_idx[args[1]], full_idx[args[2]] = full_idx[args[2]], full_idx[args[1]]
-        return self.bb.emit(relax.op.transpose(args[0], full_idx))
-
-    def _softmax(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        if node.target in self.named_modules:
-            module = self.named_modules[node.target]
-            dim = module.dim
-        else:
-            nargs = len(node.args)
-            dim = node.args[1] if nargs > 1 else node.kwargs["dim"]
-        assert dim is not None
-        return self.bb.emit(relax.op.nn.softmax(x, dim))
-
-    def _view(self, node: fx.node.Node) -> relax.Var:
-        args = self.retrive_args(node)
-        infer_idx = -1
-        prod = 1
-        new_shape = list(args[1:])
-        for i in range(len(new_shape)):
-            if new_shape[i] == -1:
-                infer_idx = i
-            else:
-                prod *= new_shape[i]
-        if infer_idx != -1:
-            new_shape[infer_idx] = np.prod(args[0].shape).value // prod
-        return self.bb.emit(relax.op.reshape(args[0], new_shape))
-
-    def _silu(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        return self.bb.emit(relax.op.silu(x))
-
-    def _group_norm(self, node: fx.node.Node) -> relax.Var:
-        # torch.nn.GroupNorm(num_groups, num_channels, eps=1e-05, affine=True, device=None, dtype=None)
-        x = self.env[node.args[0]]
-        module = self.named_modules[node.target]
-        num_groups = module.num_groups
-        num_channels = module.num_channels
-        eps = module.eps
-        affine = module.affine
-
-        shape = x.shape_
-        assert len(shape) == 4
-        N, C, H, W = shape[0], shape[1], shape[2], shape[3]
-        assert C == num_channels
-        assert C % num_groups == 0
-        grouped_x = self.bb.emit(relax.op.reshape(x, [N, num_groups, C // num_groups, H, W]))
-        mean_x = self.bb.emit(relax.op.mean(grouped_x, [2, 3, 4], keepdims=True))
-        sub_x = self.bb.emit(relax.op.subtract(grouped_x, mean_x))
-        square_x = self.bb.emit(relax.op.multiply(sub_x, sub_x))
-        sum_square_x = self.bb.emit(relax.op.sum(square_x, [2, 3, 4], keepdims=True))
-        var_x = self.bb.emit_te(topi.divide, sum_square_x, C // num_groups * H * W)
-        var_x_eps = self._call_binary_op(relax.op.add, var_x, eps)
-        std_x = self.bb.emit(relax.op.sqrt(var_x_eps))
-        norm_x = self.bb.emit(relax.op.divide(sub_x, std_x))
-
-        if affine:
-            weight = self.params[module.weight]
-            bias = self.params[module.bias]
-            weight_reshape = self.bb.emit(
-                relax.op.reshape(weight, (1, num_groups, C // num_groups, 1, 1))
-            )
-            bias_reshape = self.bb.emit(
-                relax.op.reshape(bias, (1, num_groups, C // num_groups, 1, 1))
-            )
-            norm_x = self.bb.emit(relax.op.multiply(norm_x, weight_reshape))
-            norm_x = self.bb.emit(relax.op.add(norm_x, bias_reshape))
-        return self.bb.emit(relax.op.reshape(norm_x, (N, C, H, W)))
-
-    def _layer_norm(self, node: fx.node.Node) -> relax.Var:
-        x = self.env[node.args[0]]
-        module = self.named_modules[node.target]
-
-        if module.elementwise_affine:
-            gamma = self.params[module.weight]
-            beta = self.params[module.bias]
-        else:
-            gamma = relax.const(torch.ones_like(module.normalized_shape), x.checked_type)
-            beta = relax.const(torch.zeros_like(module.normalized_shape), x.checked_type)
-        dim_num = len(module.normalized_shape)
-        axis = tuple(range(-dim_num, 0))
-
-        return self.bb.emit(relax.op.nn.layer_norm(x, gamma, beta, axis=axis, epsilon=module.eps))
-    """
-
+    # TODO(@tvm-team): More operators are implemented in https://github.com/mlc-ai/relax/pull/14
+    # Migrate more as we introduce more ops in relax branch
     def create_convert_map(self):
         self.convert_map = {
             # Torch operators
@@ -598,61 +179,6 @@ class TorchFXTranslator:
             operator.add: self._add,
             operator.mul: self._mul,
         }
-
-        """
-        # TODO(@sunggg): 
-        # These operators are supported in mlc, but not in relax branch yet.
-        # Test them out when they are ready.      
-        self.convert_map = {
-            # call_module
-            nn.Conv2d: self._conv2d,
-            nn.Linear: self._linear,
-            nn.ReLU: lambda node: self.bb.emit_te(topi.nn.relu, self.env[node.args[0]]),
-            nn.MaxPool2d: self._max_pool2d,
-            nn.AdaptiveAvgPool2d: self._adaptive_avg_pool2d,
-            nn.Flatten: self._flatten,
-            nn.BatchNorm2d: self._batch_norm_2d,
-            nn.modules.sparse.Embedding: self._embedding,
-            nn.Dropout: lambda node: self.env[node.args[0]],
-            nn.LayerNorm: self._layer_norm,
-            nn.SiLU: self._silu,
-            nn.GroupNorm: self._group_norm,
-            nn.Softmax: self._softmax,
-            # call_function
-            "add": self._add,
-            "sub": self._sub,
-            "flatten": self._flatten,
-            "size": self._size,
-            "cumsum": self._cumsum,
-            "unsqueeze": lambda node: self.bb.emit_te(
-                topi.expand_dims, self.env[node.args[0]], node.args[1], 1
-            ),
-            "getattr": self._getattr,
-            "getitem": self._getitem,
-            "mul": self._mul,
-            "sin": self._sin,
-            "cos": self._cos,
-            "cat": self._cat,
-            "truediv": self._truediv,
-            "floordiv": self._floordiv,
-            "matmul": self._matmul,
-            "gelu": self._gelu,
-            "interpolate": self._interpolate,
-            "addmm": self._addmm,
-            "split": self._split,
-            "tril": self._tril,
-            # call_method
-            "new_ones": self._new_ones,
-            "expand": self._expand,
-            "float": self._float,
-            "permute": self._permute,
-            "reshape": self._reshape,
-            "transpose": self._transpose,
-            "softmax": self._softmax,
-            "view": self._view,
-            "contiguous": lambda node: self.env[node.args[0]],
-        }
-        """
 
     def fetch_attr(self, model, target: str):
         target_atoms = target.split(".")
@@ -666,11 +192,125 @@ class TorchFXTranslator:
         return attr_itr
 
 
-def from_torch_fx(model, input_infos):
-    translator = TorchFXTranslator()
-    translator.named_modules = dict(model.named_modules())
+def get_target_func(node: fx.node.Node, named_modules: Dict) -> Callable:
+    if node.op == "call_method":
+        return getattr(torch, node.target)
+    elif node.op == "call_function":
+        return node.target
+    elif node.op == "call_module":
+        return type(named_modules[node.target])
+    else:
+        raise RuntimeError(f"Invalid op type: {node}")
+
+
+class FallbackManager:
+    def __init__(self, supported_ops: List[Callable]) -> None:
+        self.supported_ops = supported_ops
+
+    def split(self, graph_module: fx.GraphModule, root_module: torch.nn.Module) -> fx.GraphModule:
+        partition_id = 0
+        was_missing = False
+
+        def partition_callback(node: fx.node.Node):
+            nonlocal partition_id, was_missing
+            func = get_target_func(node, dict(graph_module.named_modules()))
+            # if previous op was missing op,
+            if was_missing:
+                # put the current missing op into the same partition
+                if func not in self.supported_ops:
+                    was_missing = True
+                # create the new partition for the supported op
+                else:
+                    was_missing = False
+                    partition_id += 1
+            # if previous op was supported,
+            else:
+                # create the new partition for the missing op
+                if func not in self.supported_ops:
+                    partition_id += 1
+                    was_missing = True
+                # keep the partition for the supported op
+                else:
+                    was_missing = False
+            return partition_id
+
+        return split_module(graph_module, root_module, partition_callback, keep_original_order=True)
+
+
+def convert_submodule(module: fx.GraphModule, module_name: str, arg_info: List):
+    graph = module.graph
+    translator = TorchFXTranslator(module)
+    inputs = {}
+    arg_idx = 0
+    for node in graph.nodes:
+        if node.op == "placeholder":
+            shape_, type_ = arg_info[arg_idx]
+            inputs[node.name] = relax.Var(
+                node.name,
+                shape_annotation=shape_,
+                type_annotation=type_,
+            )
+            arg_idx += 1
+        elif node.op in ["call_function", "call_method", "call_module"]:
+            func = get_target_func(node, translator.named_modules)
+            if func not in translator.convert_map:
+                return None
+
+    # Translate model parameters.
+    for _, param in module.named_parameters():
+        ndim = len(param.data.shape)
+        dtype = translator._convert_data_type(str(param.data.dtype))
+        translator.params[param] = relax.const(
+            param.data.cpu().numpy(), relax.DynTensorType(ndim, dtype)
+        )
+
+    translator.bb = relax.BlockBuilder()
+    with translator.bb.function(name=module_name, params=list(inputs.values())):
+        output = None
+        with translator.bb.dataflow():
+            for node in graph.nodes:
+                if node.op == "placeholder":
+                    assert (
+                        node.name in inputs
+                    ), "The function input {} is not found in the provided input information".format(
+                        node.name
+                    )
+                    translator.env[node] = inputs[node.name]
+                elif node.op == "output":
+                    output = translator.bb.emit_output(translator.env[node.args[0]])
+                    break
+                elif node.op == "get_attr":
+                    translator.env[node] = TorchFXTranslator._fetch_attr(module, node.target)
+                elif node.op in ["call_function", "call_method", "call_module"]:
+                    if node.op == "call_method":
+                        func = getattr(torch, node.target)
+                    elif node.op == "call_function":
+                        func = node.target
+                    else:
+                        func = type(translator.named_modules[node.target])
+                    assert func in translator.convert_map
+                    translator.env[node] = translator.convert_map[func](node)
+                else:
+                    raise ValueError(f"Unsupported Fx op {node.op}")
+
+        assert output is not None
+        translator.bb.emit_func_output(output)
+
+    relax_funcs = list(translator.bb.get().functions.values())
+    assert len(relax_funcs) == 1
+    return relax_funcs[0]
+
+
+def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
     symbolic_traced: fx.GraphModule = fx.symbolic_trace(model)
-    graph = symbolic_traced.graph
+    translator = TorchFXTranslator(symbolic_traced)
+
+    # FallbackManager will split a graph into two types of subgraphs
+    # -> sugraph for supported ops, subgraph for missing ops
+    graph_module: fx.GraphModule = FallbackManager(translator.convert_map.keys()).split(
+        symbolic_traced, model
+    )
+    graph = graph_module.graph
 
     # Extract input names from the graph
     graph_input_names = [node.name for node in graph.nodes if node.op == "placeholder"]
@@ -691,41 +331,68 @@ def from_torch_fx(model, input_infos):
             param.data.cpu().numpy(), relax.DynTensorType(ndim, dtype)
         )
 
+    print(graph)
+    # Since block builder does not allow the nestsed function generation,
+    # we create a relax function for each submodule before creating the main function.
+    submodule_map = dict()
+    for node in graph.nodes:
+        if node.op == "placeholder":
+            assert (
+                node.name in inputs
+            ), "The function input {} is not found in the provided input information".format(
+                node.name
+            )
+            translator.env[node] = inputs[node.name]
+        elif node.op == "get_attr":
+            translator.env[node] = TorchFXTranslator._fetch_attr(model, node.target)
+        elif node.op == "call_module":
+            arg_info = [
+                (
+                    TorchFXTranslator.shape_of(translator.env[arg]),
+                    TorchFXTranslator.type_of(translator.env[arg]),
+                )
+                for arg in node.args
+            ]
+            submodule = graph_module.get_submodule(node.target)
+            submodule_map[node.target] = convert_submodule(submodule, node.target, arg_info)
+
     # Initialize the block builder with a function and a dataflow block.
-    translator.bb = relax.BlockBuilder()
-    with translator.bb.function(name="main", params=list(inputs.values())):
-        # with translator.bb.function(name="main"):
+    # Construct the relax "main" function that calls each of submodule functions we created.
+    bb = translator.bb
+    with bb.function(name="main", params=list(inputs.values())):
         output = None
-        with translator.bb.dataflow():
+        with bb.dataflow():
             for node in graph.nodes:
-                if node.op == "placeholder":
-                    assert (
-                        node.name in inputs
-                    ), "The function input {} is not found in the provided input information".format(
-                        node.name
-                    )
-                    translator.env[node] = inputs[node.name]
+                if node.op == "call_module":
+                    submodule_name = node.target
+                    submodule = graph_module.get_submodule(submodule_name)
+
+                    relax_args = []
+                    for arg in node.args:
+                        assert arg in translator.env
+                        relax_args.append(translator.env[arg])
+
+                    assert submodule_name in submodule_map
+                    relax_func = submodule_map[submodule_name]
+                    if relax_func:
+                        gv = bb.add_func(relax_func, submodule_name)
+                        call_expr = relax.Call(gv, relax_args)
+                        call = bb.emit(call_expr)
+                    else:
+                        fallback_path = "temp_fallback_submodules"
+                        if not os.path.exists(fallback_path):
+                            os.mkdir(fallback_path)
+                        # Serialize fallback modules
+                        # NOTE: we use jit.script API only because it provides robust
+                        #       serialization/deserialization. If we can find another API,
+                        #       we can switch to the new one.
+                        torch.jit.script(submodule).save(f"{fallback_path}/{node.target}.pt")
+                        assert 0, "Need to implement - generate packed func"
+                    translator.env[submodule_name] = call
                 elif node.op == "output":
-                    output = translator.bb.emit_output(translator.env[node.args[0]])
+                    output = bb.emit_output(translator.env[str(node.args[0])])
                     break
-                elif node.op == "get_attr":
-                    translator.env[node] = TorchFXTranslator._fetch_attr(model, node.target)
-                elif node.op == "call_module":
-                    module = translator.named_modules[node.target]
-                    assert (
-                        type(module) in translator.convert_map
-                    ), f"Unsupported module type {type(module)}"
-                    translator.env[node] = translator.convert_map[type(module)](node)
-                elif node.op in ["call_function", "call_method"]:
-                    func = getattr(torch, node.target) if node.op == "call_method" else node.target
-                    assert (
-                        func in translator.convert_map
-                    ), f"Unsupported method target {node.target}"
 
-                    translator.env[node] = translator.convert_map[func](node)
-                else:
-                    raise ValueError(f"Unsupported op {node.op}")
         assert output is not None
-        translator.bb.emit_func_output(output)
-
-    return translator.bb.get()
+        bb.emit_func_output(output)
+    return bb.get()
