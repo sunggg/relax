@@ -93,18 +93,26 @@ class TorchFXTranslator:
 
     @staticmethod
     def shape_of(tensor):
-        if isinstance(tensor, relax.Var):
+        if tensor is None:
+            # Subgraph for missing ops would not have shape info
+            return relax.RuntimeDepShape()
+        elif isinstance(tensor, relax.Var):
             return tensor.shape_
         elif isinstance(tensor, torch.Tensor):
             return tensor.shape
         elif isinstance(tensor, relax.Constant):
             return tensor.data.shape
+        else:
+            raise Exception(f"Please check your tensor: {tensor}")
 
     @staticmethod
     def type_of(tensor):
-        # TODO(@tvm-team): Since `relax.const` does not populate `checked_type` now,
-        # we manually reconstruct type info as a temporary solution.
-        if isinstance(tensor, relax.Constant):
+        if tensor is None:
+            # Subgraph for missing ops would not have shape info
+            return relax.DynTensorType(-1, None)
+        elif isinstance(tensor, relax.Constant):
+            # TODO(@tvm-team): Since `relax.const` does not populate `checked_type` now,
+            # we manually reconstruct type info as a temporary solution.
             ndim = len(tensor.data.shape)
             dtype = TorchFXTranslator._convert_data_type(str(tensor.data.dtype))
             return relax.DynTensorType(ndim, dtype)
@@ -301,6 +309,35 @@ def convert_submodule(module: fx.GraphModule, module_name: str, arg_info: List):
     return relax_funcs[0]
 
 
+def extract_output_info(
+    translator: TorchFXTranslator, node: fx.node.Node, submodule: fx.GraphModule
+):
+    test_inputs = []
+    for arg_ in node.args:
+        assert arg_ in translator.env
+        relax_arg_ = translator.env[arg_]
+        arg_shape = [int(i) for i in relax_arg_.shape]
+        np_input = np.random.rand(*arg_shape).astype(relax_arg_.checked_type.dtype)
+        test_inputs.append(torch.from_numpy(np_input))
+
+    res = fx.Interpreter(submodule).run(*test_inputs)
+    if isinstance(res, tuple):
+        out_shapes, out_types = [], []
+        for e in res:
+            out_shape_ = tuple(e.shape)
+            out_shapes.append(relax.ShapeExpr(out_shape_))
+            dtype_ = TorchFXTranslator._convert_data_type(str(e.dtype))
+            out_types.append(relax.DynTensorType(len(out_shape_), dtype_))
+        out_shape = relax.Tuple(out_shapes)
+        out_type = relax.TupleType(out_types)
+    else:
+        out_shape = tuple(res.shape)
+        dtype_ = TorchFXTranslator._convert_data_type(str(res.dtype))
+        out_type = relax.DynTensorType(len(out_shape), dtype_)
+
+    return (out_shape, out_type)
+
+
 def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
     symbolic_traced: fx.GraphModule = fx.symbolic_trace(model)
     translator = TorchFXTranslator(symbolic_traced)
@@ -331,10 +368,9 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
             param.data.cpu().numpy(), relax.DynTensorType(ndim, dtype)
         )
 
-    print(graph)
+    missing_info = dict()
     # Since block builder does not allow the nestsed function generation,
     # we create a relax function for each submodule before creating the main function.
-    submodule_map = dict()
     for node in graph.nodes:
         if node.op == "placeholder":
             assert (
@@ -346,19 +382,33 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
         elif node.op == "get_attr":
             translator.env[node] = TorchFXTranslator._fetch_attr(model, node.target)
         elif node.op == "call_module":
-            arg_info = [
-                (
-                    TorchFXTranslator.shape_of(translator.env[arg]),
-                    TorchFXTranslator.type_of(translator.env[arg]),
-                )
-                for arg in node.args
-            ]
+            arg_info = []
+            for arg in node.args:
+                print(arg)
+                relax_arg = translator.env[arg]
+                if relax_arg:
+                    arg_info.append(
+                        (
+                            TorchFXTranslator.shape_of(translator.env[arg]),
+                            TorchFXTranslator.type_of(translator.env[arg]),
+                        )
+                    )
+                else:
+                    assert arg.op == "call_module"
+                    unknown_submodule = graph_module.get_submodule(arg.target)
+                    assert unknown_submodule in missing_info
+                    arg_info.append(missing_info[unknown_submodule])
+
             submodule = graph_module.get_submodule(node.target)
-            submodule_map[node.target] = convert_submodule(submodule, node.target, arg_info)
+            relax_func = convert_submodule(submodule, node.target, arg_info)
+            translator.env[node] = relax_func
+            if relax_func is None:
+                missing_info[submodule] = extract_output_info(translator, node, submodule)
 
     # Initialize the block builder with a function and a dataflow block.
     # Construct the relax "main" function that calls each of submodule functions we created.
     bb = translator.bb
+    ext_mods = list()
     with bb.function(name="main", params=list(inputs.values())):
         output = None
         with bb.dataflow():
@@ -366,33 +416,60 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
                 if node.op == "call_module":
                     submodule_name = node.target
                     submodule = graph_module.get_submodule(submodule_name)
+                    relax_args = [translator.env[arg] for arg in node.args]
 
-                    relax_args = []
-                    for arg in node.args:
-                        assert arg in translator.env
-                        relax_args.append(translator.env[arg])
-
-                    assert submodule_name in submodule_map
-                    relax_func = submodule_map[submodule_name]
+                    assert node in translator.env
+                    relax_func = translator.env[node]
                     if relax_func:
                         gv = bb.add_func(relax_func, submodule_name)
-                        call_expr = relax.Call(gv, relax_args)
-                        call = bb.emit(call_expr)
+                        caller = bb.emit(relax.Call(gv, relax_args))
                     else:
-                        fallback_path = "temp_fallback_submodules"
-                        if not os.path.exists(fallback_path):
-                            os.mkdir(fallback_path)
+                        fallback_dir = "temp_fallback_submodules"
+                        if not os.path.exists(fallback_dir):
+                            os.mkdir(fallback_dir)
+
+                        fallback_path = f"{fallback_dir}/submod_1.pt"
                         # Serialize fallback modules
                         # NOTE: we use jit.script API only because it provides robust
                         #       serialization/deserialization. If we can find another API,
                         #       we can switch to the new one.
-                        torch.jit.script(submodule).save(f"{fallback_path}/{node.target}.pt")
-                        assert 0, "Need to implement - generate packed func"
-                    translator.env[submodule_name] = call
+                        # torch.jit.script(submodule).save(f"{fallback_path}/{node.target}.pt")
+                        torch.jit.script(submodule).save(fallback_path)
+
+                        # Define global symbol
+                        global_symbol = f"fallback_{node.target}"
+                        num_inputs, num_outputs = len(node.args), 1
+
+                        # Build BYOC runtime and wrap with TVM runtime::Module
+                        gen_rt_mod = tvm.get_global_func("relax.CreateTorchFallbackRuntime")
+                        assert gen_rt_mod
+                        fallback_mod = gen_rt_mod(
+                            global_symbol,
+                            fallback_path,
+                            num_inputs,
+                            num_outputs,
+                        )
+                        ext_mods.append(fallback_mod)
+                        # create external call with the global symbol
+                        out_shape, out_type = missing_info[submodule]
+                        caller = bb.emit(
+                            relax.Call(
+                                op=tvm.ir.Op.get("relax.call_tir"),
+                                args=[
+                                    relax.ExternFunc(global_symbol),
+                                    relax.Tuple(relax_args),
+                                    relax.ShapeExpr(out_shape),
+                                ],
+                                type_args=[out_type],
+                            )
+                        )
+
+                    translator.env[node] = caller
                 elif node.op == "output":
-                    output = bb.emit_output(translator.env[str(node.args[0])])
+                    output = bb.emit_output(translator.env[node.args[0]])
                     break
 
         assert output is not None
         bb.emit_func_output(output)
-    return bb.get()
+    out_mod = bb.get()
+    return out_mod.with_attr("external_mods", ext_mods)
