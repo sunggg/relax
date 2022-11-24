@@ -170,6 +170,14 @@ class TupleType(Type):
     def __init__(self, fields, span: Span = None):
         self.__init_handle_by_constructor__(_ffi_api.TupleType, fields, span)
 
+    def __getitem__(self, index):
+        if index >= len(self):
+            raise IndexError("TupleType index out of range")
+        return self.fields[index]
+
+    def __len__(self):
+        return len(self.fields)
+
 
 @tvm._ffi.register_object("TypeConstraint")
 class TypeConstraint(Type):

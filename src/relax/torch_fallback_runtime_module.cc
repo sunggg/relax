@@ -96,7 +96,6 @@ class TorchFallbackRuntimeNode : public tvm::runtime::ModuleNode {
             }
             ICHECK(outputs.size() == 1) << "wrong number of args, can handle only one output";
             torch::Tensor res = torch_mod.forward(inputs).toTensor();
-            //*rv = runtime::NDArray::FromDLPack(at::toDLPack(res));
             outputs[0].copy_(res);  // too bad
           });
     } else {

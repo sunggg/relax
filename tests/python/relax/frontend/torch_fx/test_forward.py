@@ -77,7 +77,6 @@ def verify_model(
 
     target, dev = tvm.target.Target("llvm --num-cores=16"), tvm.cpu()
     mod = relax.frontend.from_torch_fx(baseline_model, input_infos)
-    print(mod)
 
     with tempfile.TemporaryDirectory() as work_dir:
         with tvm.transform.PassContext(opt_level=3):
@@ -92,6 +91,8 @@ def verify_model(
                 task_scheduler="round-robin",
             )
             ex = ms.relax_integration.compile_relax(db, mod, target, params=None)
+
+    print(mod)
     vm = relax.VirtualMachine(ex, dev)
 
     # Set up TVM inputs
@@ -249,4 +250,3 @@ if __name__ == "__main__":
     # test_forward_matmul()
     # test_forward_abs()
     # tvm.testing.main()
-    test_forward_model()

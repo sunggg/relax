@@ -277,6 +277,7 @@ Expr ExprMutatorBase::VisitExpr_(const CallNode* call_node) {
     call_args.push_back(new_arg);
     unchanged &= new_arg.same_as(arg);
   }
+  ICHECK(call_node->checked_type_.defined());
 
   if (unchanged) {
     return GetRef<Expr>(call_node);
