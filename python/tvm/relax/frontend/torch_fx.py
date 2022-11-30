@@ -441,10 +441,8 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
             translator.env[node] = TorchFXTranslator._fetch_attr(model, node.target)
         elif node.op == "call_module":
             arg_info = []
-            print(node)
             for arg in node.args:
                 if arg in translator.env:
-                    print(arg, type(arg), arg.op)
                     arg_info.append(
                         (
                             TorchFXTranslator.shape_of(translator.env[arg]),
@@ -537,6 +535,8 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
                                 type_args=[out_type],
                             )
                         )
+                        print(f"### Checked type: {caller}, {caller.checked_type}")
+                        # print(caller.checked_type_)
 
                     translator.env[node] = caller
                 elif node.op == "output":

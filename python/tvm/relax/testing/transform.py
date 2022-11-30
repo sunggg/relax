@@ -103,7 +103,7 @@ class LowerWithRelayOpStrategyPass(transform.Pass):
                         compute_func,
                         call_node.attrs,
                         call_node.args,
-                        call_node.attrs,
+                        out_type=call_node.checked_type,
                         primfunc_name_hint=name_hint,
                     )
                 else:
