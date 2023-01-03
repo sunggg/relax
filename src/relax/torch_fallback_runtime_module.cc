@@ -21,17 +21,22 @@
  * \file src/relax/torch_fallback_runtime_module.cc
  * \brief Runtime module for torch fallback external module.
  */
+
+// clang-format off
+#include <dlpack/dlpack.h>
+//#include <tvm/node/reflection.h>
+//#include<tvm / relax / tuning_api.h>
+#include <tvm/runtime/module.h>
+//#include <tvm/runtime/ndarray.h>
+//#include <tvm/runtime/object.h>
+#include <tvm/runtime/registry.h>
+
 #include <ATen/DLConvertor.h>
 #include <ATen/dlpack.h>
 #include <torch/csrc/jit/serialization/import.h>
 #include <torch/script.h>
 #include <torch/torch.h>
-#include <tvm/node/reflection.h>
-#include <tvm/relax/tuning_api.h>
-#include <tvm/runtime/module.h>
-#include <tvm/runtime/ndarray.h>
-#include <tvm/runtime/object.h>
-#include <tvm/runtime/registry.h>
+
 
 namespace tvm {
 namespace relax {
@@ -88,15 +93,25 @@ class TorchFallbackRuntimeNode : public tvm::runtime::ModuleNode {
               inp->deleter = &monly_deleter;
               // m.num_inputs includes the self argument of forward(self, ...)
               // num_inputs - 1 is the number of (Tensor) inputs
-              if (i < static_cast<int>(m.num_inputs()) - 1) {
+              if (i < static_cast<int>(m.num_inputs())-1) {
                 inputs.emplace_back(at::fromDLPack(inp));
               } else {
                 outputs.emplace_back(at::fromDLPack(inp));
               }
             }
-            ICHECK(outputs.size() == 1) << "wrong number of args, can handle only one output";
-            torch::Tensor res = torch_mod.forward(inputs).toTensor();
-            outputs[0].copy_(res);  // too bad
+
+            auto res = torch_mod.forward(inputs);
+            if(res.isTuple()){
+              auto elems = res.toTuple()->elements();
+              ICHECK(elems.size() == outputs.size());
+              for(size_t i=0;i<elems.size();i++){
+                outputs[i].copy_(elems[i].toTensor());
+              }
+            }else if(res.isTensor()){
+               outputs[0].copy_(res.toTensor());  // too bad
+            }else{
+              ICHECK(0) << "Undefined output type.";
+            }
           });
     } else {
       return tvm::runtime::PackedFunc(nullptr);

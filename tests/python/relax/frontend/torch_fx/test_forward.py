@@ -17,12 +17,13 @@
 # pylint: disable=import-self, invalid-name, unused-argument
 """Unit tests for various models and operators"""
 
-import sys
+import sys, os
 import tempfile
 import numpy as np
 import torch
 from torch.nn import Module
 from torch.nn import functional as F
+from typing import Any, Dict
 
 import tvm
 import tvm.testing
@@ -77,7 +78,6 @@ def verify_model(
 
     target, dev = tvm.target.Target("llvm --num-cores=16"), tvm.cpu()
     mod = relax.frontend.from_torch_fx(baseline_model, input_infos)
-    mod.show()
     assert relax.analysis.well_formed(mod)
 
     with tempfile.TemporaryDirectory() as work_dir:
@@ -89,7 +89,7 @@ def verify_model(
                 target=target,
                 work_dir=work_dir,
                 num_trials_per_iter=10,
-                max_trials_global=10,
+                max_trials_global=50,
                 task_scheduler="round-robin",
             )
             assert relax.analysis.well_formed(mod)
@@ -231,23 +231,112 @@ def test_forward_mixed():
 
 
 # @tvm.testing.uses_gpu
-def test_forward_model():
+def test_forward_model(name):
     from torchvision import models
 
-    input_shape = (1, 3, 228, 228)
+    if name in ["resnet3d_18"]:
+        input_shape = (1, 3, 3, 228, 228)
+    else:
+        input_shape = (1, 3, 228, 228)
+
+    print(f"Run {name}..., input shape {input_shape}")
+    params: Dict[str, Any] = {}
+    if name in ["resnet_18", "resnet_50"]:
+        model = getattr(models, name.replace("_", ""))
+    elif name == "wide_resnet_50":
+        model = getattr(models, "wide_resnet50_2")
+    elif name == "resnext_50":
+        model = getattr(models, "resnext50_32x4d")
+    elif name == "mobilenet_v2":
+        model = getattr(models, name)
+    elif name == "mobilenet_v3":
+        model = getattr(models, name + "_large")
+    elif name == "inception_v3":
+        model = getattr(models, name)
+        params["aux_logits"] = False
+    elif name == "densenet_121":
+        model = getattr(models, name.replace("_", ""))
+    elif name == "resnet3d_18":
+        model = models.video.r3d_18
+    elif name == "vgg_16":
+        model = getattr(models, name.replace("_", ""))
+    try:
+        model = model(**params, weights=None)
+    except TypeError:
+        model = model(**params, pretrained=False)
+
     dtype = "float32"
     input_data = torch.randn(input_shape).type(  # pylint: disable=no-member
         {
             "float32": torch.float32,  # pylint: disable=no-member
         }[dtype]
     )
-    resnet = models.resnet18()
-    resnet.eval()
-    verify_model(resnet, input_data=input_data, use_cpu=True)
+
+    model.eval()
+    verify_model(model, input_data=input_data, use_cpu=True)
+    print("Completed!")
+
+
+def test_forward_bert(name="bert_base"):
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    import transformers
+    from transformers.models.bert import modeling_bert as bert
+
+    config_dict = {
+        "bert_tiny": transformers.BertConfig(
+            num_hidden_layers=6,
+            hidden_size=512,
+            intermediate_size=2048,
+            num_attention_heads=8,
+            return_dict=False,
+        ),
+        "bert_base": transformers.BertConfig(
+            num_hidden_layers=12,
+            hidden_size=768,
+            intermediate_size=3072,
+            num_attention_heads=12,
+            return_dict=False,
+        ),
+        "bert_medium": transformers.BertConfig(
+            num_hidden_layers=12,
+            hidden_size=1024,
+            intermediate_size=4096,
+            num_attention_heads=16,
+            return_dict=False,
+        ),
+        "bert_large": transformers.BertConfig(
+            num_hidden_layers=24,
+            hidden_size=1024,
+            intermediate_size=4096,
+            num_attention_heads=16,
+            return_dict=False,
+        ),
+    }
+    configuration = config_dict[name]
+    model = bert.BertSelfAttention(configuration)
+
+    dtype = "int64"
+    input_data = torch.randint(10000, (768, 768, 768)).type(torch.float32)
+    model.eval()
+    verify_model(model, input_data=input_data, use_cpu=True)
+    print("Completed!")
 
 
 if __name__ == "__main__":
-    test_forward_model()
+    model_names = [
+        "resnet_18",
+        # "resnet_50",
+        # "mobilenet_v2",
+        # "mobilenet_v3",
+        # "wide_resnet_50",
+        # "resnext_50",
+        # "inception_v3",
+        # "densenet_121",
+        "vgg_16",
+        "resnet3d_18",
+    ]
+    test_forward_model("resnet3d_18")
+    # test_forward_bert()
     # test_forward_mixed()
     # test_forward_matmul()
     # test_forward_abs()

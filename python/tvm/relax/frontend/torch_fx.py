@@ -426,7 +426,6 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
             param.data.cpu().numpy(), relax.DynTensorType(ndim, dtype)
         )
 
-    print(graph)
     # Since block builder does not allow the nestsed function generation,
     # we create a relax function for each submodule before creating the main function.
     for node in graph.nodes:
@@ -464,6 +463,7 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
                 translator.env[node] = relax_func
             else:
                 translator.missing_info[node] = extract_output_info(translator, node, submodule)
+
         elif node.op == "call_function":
             func = node.target
             # Graph splitter often inserts getitem, so we need to handle it here
@@ -494,13 +494,12 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
                     if node in translator.env:
                         gv = bb.add_func(translator.env[node], submodule_name)
                         caller = bb.emit(relax.Call(gv, relax_args))
-                        print(f"====> caller: {caller}, {caller.checked_type}")
                     else:
                         fallback_dir = "temp_fallback_submodules"
                         if not os.path.exists(fallback_dir):
                             os.mkdir(fallback_dir)
 
-                        fallback_path = f"{fallback_dir}/submod_1.pt"
+                        fallback_path = f"{fallback_dir}/{node.target}.pt"
                         # Serialize fallback modules
                         # NOTE: we use jit.script API only because it provides robust
                         #       serialization/deserialization. If we can find another API,
@@ -535,8 +534,6 @@ def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
                                 type_args=[out_type],
                             )
                         )
-                        print(f"### Checked type: {caller}, {caller.checked_type}")
-                        # print(caller.checked_type_)
 
                     translator.env[node] = caller
                 elif node.op == "output":

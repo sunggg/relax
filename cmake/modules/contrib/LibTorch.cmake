@@ -6,7 +6,7 @@
 # "License"); you may not use this file except in compliance
 # with the License.  You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+# http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing,
 # software distributed under the License is distributed on an
@@ -17,14 +17,14 @@
 
 if(USE_LIBTORCH)
   find_package(Torch REQUIRED PATHS ${USE_LIBTORCH}/share/cmake/Torch
-               )
+  )
   list(APPEND TVM_RUNTIME_LINKER_LIBS ${TORCH_LIBRARIES})
   include_directories(${TORCH_INCLUDE_DIRS})
 
   file(GLOB LIBTORCH_RELAY_CONTRIB_SRC
     src/relay/backend/contrib/libtorch/libtorch_codegen.cc
     src/runtime/contrib/libtorch/libtorch_runtime.cc
-    )
+    src/relax/torch_fallback_runtime_module.cc
+  )
   list(APPEND COMPILER_SRCS ${LIBTORCH_RELAY_CONTRIB_SRC})
-
 endif(USE_LIBTORCH)

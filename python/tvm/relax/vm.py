@@ -504,10 +504,7 @@ def build(
     passes.append(relax.transform.VMMemoryLower())
     passes.append(relax.transform.VMShapeLower())
     seq = tvm.transform.Sequential(passes)
-
-    mod.show()
     new_mod = seq(mod)
-    assert 0
 
     # Split primfunc and relax function
     rx_mod, tir_mod = _split_tir_relax(new_mod)

@@ -119,33 +119,12 @@ class BlockBuilderNode::ExprNormalizer : public ExprFunctor<Expr(const Expr&)> {
     }
 
     // Tuple's checked_type must not be null
-    std::cout << tuple << "\n";
     if (!tuple->checked_type_.defined()) {
       if (tuple->fields.size() == 0) {
         UpdateType(tuple, VoidType());
       }
       Array<Type> tuple_type;
       for (Expr field : tuple->fields) {
-        if (auto var = field.as<VarNode>()) {
-          auto e = builder_->LookupBinding(GetRef<Var>(var));
-          if (e.defined()) {
-            Expr ee = e.value();
-            if (auto call_node = ee.as<CallNode>()) {
-              Call call = GetRef<Call>(call_node);
-              std::cout << " -- " << var->name_hint() << " // " << call << " // " << call->op
-                        << "\n";
-              if (auto vv = call->op.as<VarNode>())
-                std::cout << builder_->LookupBinding(GetRef<Var>(vv)) << "\n";
-              for (auto arg : call->args) {
-                if (auto argvar = arg.as<VarNode>()) {
-                  auto eee = builder_->LookupBinding(GetRef<Var>(argvar));
-                  std::cout << "\t\t >>" << argvar->name_hint() << " // " << eee << " // "
-                            << eee.value()->checked_type_ << "\n";
-                }
-              }
-            }
-          }
-        }
         ICHECK(field->checked_type_.defined())
             << "The checked_type_ of the field " << field << " of Tuple has not propagated.";
         tuple_type.push_back(field->checked_type_);
