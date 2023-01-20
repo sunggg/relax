@@ -234,6 +234,8 @@ class TorchFXTranslator:
     # TODO(@tvm-team): More operators are implemented in https://github.com/mlc-ai/relax/pull/14
     # Migrate more as we introduce more ops in relax branch
     def create_convert_map(self):
+        self.convert_map = {}
+        """
         self.convert_map = {
             # Torch operators
             torch.add: self._add,
@@ -243,6 +245,7 @@ class TorchFXTranslator:
             operator.mul: self._mul,
             operator.getitem: self._getitem,
         }
+        """
 
     def fetch_attr(self, model, target: str):
         target_atoms = target.split(".")
@@ -397,6 +400,7 @@ def extract_output_info(
 
 
 def from_torch_fx(model: torch.nn.Module, input_infos: Dict[str, Tuple]):
+
     symbolic_traced: fx.GraphModule = fx.symbolic_trace(model)
     translator = TorchFXTranslator(symbolic_traced)
 

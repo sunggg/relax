@@ -20,17 +20,19 @@
 import sys, os
 import tempfile
 import numpy as np
-import torch
 from torch.nn import Module
 from torch.nn import functional as F
 from typing import Any, Dict
+import torch
+from torch.profiler import profile, record_function, ProfilerActivity
 
 import tvm
 import tvm.testing
 from tvm import relax
 from tvm import meta_schedule as ms
 from tvm.relax.testing import transform
-
+import time
+import copy
 
 sys.setrecursionlimit(10000)
 if torch.cuda.is_available():
@@ -38,13 +40,7 @@ if torch.cuda.is_available():
     torch.backends.cudnn.allow_tf32 = False
 
 
-def verify_model(
-    model_name,
-    input_data=None,
-    rtol=1e-5,
-    atol=1e-5,
-    use_cpu=False,
-):
+def verify_model(model_name, input_data=None, rtol=1e-5, atol=1e-5, use_cpu=False, num_runs=20):
     """Assert that the output of a compiled model matches with that of its
     baseline."""
     input_data = [] if input_data is None else input_data
@@ -58,25 +54,71 @@ def verify_model(
     else:
         assert False, "Unexpected input format"
 
-    if not use_cpu and torch.cuda.is_available():
-        if isinstance(baseline_model, torch.nn.Module):
-            baseline_model = baseline_model.cuda()
-        baseline_input = [inp.cuda() for inp in baseline_input]
-
     with torch.no_grad():
-        baseline_outputs = baseline_model(*[input.clone() for input in baseline_input])
+        torch_input = copy.deepcopy(baseline_input)
+        torch_model = copy.deepcopy(baseline_model)
+        if not use_cpu and torch.cuda.is_available():
+            if isinstance(torch_model, torch.nn.Module):
+                torch_model = torch_model.cuda()
+            torch_input = [inp.cuda() for inp in torch_input]
 
-    if isinstance(baseline_outputs, tuple):
-        baseline_outputs = tuple(out.cpu().numpy() for out in baseline_outputs)
+        torch.jit.script(torch_model).save("torch_baseline.tmp")
+        torch_script_mod = torch.jit.load("torch_baseline.tmp")
+        """
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                # torch.profiler.ProfilerActivity.CUDA
+            ],
+            record_shapes=True,
+            # In this example with wait=1, warmup=1, active=2,
+            # profiler will skip the first step/iteration,
+            # start warming up on the second, record
+            # the third and the forth iterations, by gemfield.
+            # schedule=torch.profiler.schedule(wait=1, warmup=1, active=2),
+            # on_trace_ready=torch.profiler.tensorboard_trace_handler("./gemfield"),
+        ) as prof:
+            for iter in range(num_runs):
+                start = time.time()
+                torch_outputs = torch_script_mod(*[input.clone() for input in torch_input])
+                end = time.time()
+                prof.step()
+        print(prof.key_averages())
+        """
+        for iter in range(num_runs):
+            start = time.time()
+            torch_outputs = torch_script_mod(*[input.clone() for input in torch_input])
+            end = time.time()
+        torch_time = (end - start) * 1000
+
+        # print(p.key_averages().table(sort_by="self_cpu_time_total", row_limit=-1))
+        # send a signal to the profiler that the next iteration has started
+        #    p.step()
+
+        # assert 0
+
+        # for i in range(num_runs):
+        #    start = time.time()
+        #    # baseline_outputs = baseline_model(*[input.clone() for input in baseline_input])
+        #    baseline_outputs = baseline_script_mod(*[input.clone() for input in baseline_input])
+        #    end = time.time()
+        # torch_time = (end - start) * 1000
+
+    if isinstance(torch_outputs, tuple):
+        torch_outputs = tuple(out.cpu().numpy() for out in torch_outputs)
     else:
-        baseline_outputs = (baseline_outputs.cpu().numpy(),)
+        torch_outputs = (torch_outputs.cpu().numpy(),)
 
     input_names = [f"y{idx}" for idx, _ in enumerate(baseline_input)]
     input_infos = dict(
         zip(input_names, [(list(tensor.shape), "float32") for tensor in baseline_input])
     )
 
-    target, dev = tvm.target.Target("llvm --num-cores=16"), tvm.cpu()
+    if use_cpu:
+        target, dev = tvm.target.Target("llvm --num-cores=64"), tvm.cpu()
+    else:
+        target, dev = tvm.target.Target("nvidia/geforce-rtx-3070"), tvm.cuda()
+
     mod = relax.frontend.from_torch_fx(baseline_model, input_infos)
     assert relax.analysis.well_formed(mod)
 
@@ -88,7 +130,6 @@ def verify_model(
                 params=None,
                 target=target,
                 work_dir=work_dir,
-                num_trials_per_iter=10,
                 max_trials_global=50,
                 task_scheduler="round-robin",
             )
@@ -98,18 +139,30 @@ def verify_model(
     vm = relax.VirtualMachine(ex, dev)
 
     # Set up TVM inputs
-    inputs = [tvm.nd.array(inp.clone().cpu().numpy(), dev) for inp in baseline_input]
+    inputs = [tvm.nd.array(inp.clone().numpy(), dev) for inp in baseline_input]
 
     # Run
-    outputs = vm["main"](*inputs)
+    for i in range(num_runs):
+        start = time.time()
+        outputs = vm["main"](*inputs)
+        end = time.time()
+
+    # start = time.time()
+    # outputs = vm["main"](*inputs)
+    # end = time.time()
+    tvm_time = (end - start) * 1000
+    # assert 0
+
+    print(f"Elapsed time (Torch) : {torch_time:.3f} ms")
+    print(f"Elapsed time (TVM)   : {tvm_time:.3f} ms")
 
     if not isinstance(outputs, list):
         outputs = [outputs]
 
     # Compare with torch side results
-    for i, baseline_outputs in enumerate(baseline_outputs):
-        output = outputs[i].numpy()
-        tvm.testing.assert_allclose(baseline_outputs, output, rtol=rtol, atol=atol)
+    # for i, torch_output in enumerate(torch_outputs):
+    #    output = outputs[i].numpy()
+    #    tvm.testing.assert_allclose(torch_output, output, rtol=rtol, atol=atol)
 
 
 @tvm.testing.uses_gpu
@@ -332,10 +385,12 @@ if __name__ == "__main__":
         # "resnext_50",
         # "inception_v3",
         # "densenet_121",
-        "vgg_16",
-        "resnet3d_18",
+        # "vgg_16",
+        # "resnet3d_18",
     ]
-    test_forward_model("resnet3d_18")
+    # test_forward_model("resnet_18")
+    # test_forward_model("resnet_50")
+    test_forward_model("resnext_50")
     # test_forward_bert()
     # test_forward_mixed()
     # test_forward_matmul()

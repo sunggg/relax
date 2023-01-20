@@ -36,11 +36,13 @@
 #include <torch/csrc/jit/serialization/import.h>
 #include <torch/script.h>
 #include <torch/torch.h>
-
+#include <chrono>
+// torch/csrc/autograd/profiler.h
 
 namespace tvm {
 namespace relax {
 
+double time_cpy=0;
 static void monly_deleter(DLManagedTensor* self) { delete self; }
 
 class TorchFallbackRuntimeNode : public tvm::runtime::ModuleNode {
@@ -53,12 +55,27 @@ class TorchFallbackRuntimeNode : public tvm::runtime::ModuleNode {
   int num_inputs_;
   int num_outputs_;
 
+  torch::jit::script::Module torch_mod;
   TorchFallbackRuntimeNode(String symbol_name, String path_serialized_format, int num_inputs,
                            int num_outputs)
       : symbol_name_(symbol_name),
         path_serialized_format_(path_serialized_format),
         num_inputs_(num_inputs),
-        num_outputs_(num_outputs) {}
+        num_outputs_(num_outputs) { 
+          at::init_num_threads();
+          torch_mod = torch::jit::load(path_serialized_format_); 
+          torch::NoGradGuard no_grad;
+          torch_mod.eval();
+          torch::autograd::profiler::RecordProfile guard("gemfield/gemfield.pt.trace.json");
+
+          // Run on GPU
+          torch::Device device = torch::kCPU;
+          if (torch::cuda::is_available()) {
+          //  std::cout << "CUDA is available!";
+          //  device = torch::kCUDA;
+          }
+          torch_mod.to(device);
+        }
 
   /*! \brief The default destructor. */
   virtual ~TorchFallbackRuntimeNode() = default;
@@ -77,7 +94,7 @@ class TorchFallbackRuntimeNode : public tvm::runtime::ModuleNode {
           [sptr_to_self, this](tvm::runtime::TVMArgs args, tvm::runtime::TVMRetValue* rv) {
             std::vector<torch::jit::IValue> inputs;
             std::vector<torch::Tensor> outputs;
-            torch::jit::script::Module torch_mod = torch::jit::load(path_serialized_format_);
+            
             auto m = torch_mod.get_method("forward");
 
             for (int i = 0; i < args.size(); i++) {
@@ -99,19 +116,35 @@ class TorchFallbackRuntimeNode : public tvm::runtime::ModuleNode {
                 outputs.emplace_back(at::fromDLPack(inp));
               }
             }
-
+            //auto t1 = std::chrono::high_resolution_clock::now();
             auto res = torch_mod.forward(inputs);
+            //auto t2 = std::chrono::high_resolution_clock::now();
+
+            //double time_fwd = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()/1000.0;
+            
+            //std::cout << "==============================\n";
+            //t1 = std::chrono::high_resolution_clock::now();
+            // too bad. need explicit copy
+            
+            auto t1 = std::chrono::high_resolution_clock::now();
             if(res.isTuple()){
+              std::cout << " ## copy tuple...\n";
               auto elems = res.toTuple()->elements();
               ICHECK(elems.size() == outputs.size());
               for(size_t i=0;i<elems.size();i++){
                 outputs[i].copy_(elems[i].toTensor());
               }
             }else if(res.isTensor()){
-               outputs[0].copy_(res.toTensor());  // too bad
+              //std::cout << " ## copy tensor...\n";
+              outputs[0].copy_(res.toTensor());  
             }else{
               ICHECK(0) << "Undefined output type.";
             }
+            auto t2 = std::chrono::high_resolution_clock::now();
+            double time_cpy = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count()/1000.0;
+
+            //std::cout << " -- fwd: " << time_fwd << " ms\n";
+            std::cout << " -- cpy: " << time_cpy << " ms\n";
           });
     } else {
       return tvm::runtime::PackedFunc(nullptr);
